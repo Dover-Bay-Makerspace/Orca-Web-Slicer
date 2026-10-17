@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orca Web Slicer</title>
+  <meta name="description" content="OrcaSlicer running in your browser. Slice 3D models into G-code without installing anything; files never leave your computer.">
+  <!-- Adds the cross-origin isolation headers on hosts that can't set them (e.g. GitHub Pages). -->
+  <script src="coi-serviceworker.min.js"></script>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23e8892b'/%3E%3Cpath d='M7 23h18M9 19h14M11 15h10M13 11h6' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/app.css">
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/" } }
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7"/><path d="M7 23h18M9 19h14M11 15h10M13 11h6"/></svg>
+      <span>Orca Web Slicer</span>
+    </div>
+    <div class="topbar-right">
+      <span id="engineStatus" class="pill pill-wait" title="Slicing engine status">Engine loading…</span>
+      <button id="aboutBtn" class="ghost" type="button">About</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar" aria-label="Print settings">
+      <div class="sidebar-scroll">
+      <section class="panel">
+        <h2>Printer</h2>
+        <label class="field"><span>Brand</span><select id="vendorSelect"></select></label>
+        <label class="field"><span>Printer</span><select id="printerSelect"></select></label>
+        <label class="field"><span>Build plate</span><select id="bedTypeSelect"></select></label>
+        <p class="hint" id="bedInfo"></p>
+      </section>
+
+      <section class="panel">
+        <h2>Filament</h2>
+        <label class="field"><span>Material</span><select id="filamentSelect"></select></label>
+      </section>
+
+      <section class="panel">
+        <h2>Print settings</h2>
+        <label class="field"><span>Profile</span><select id="processSelect"></select></label>
+        <div class="quick">
+          <label class="field"><span>Layer height (mm)</span><input id="qLayer" type="number" min="0.04" max="1" step="0.02"></label>
+          <label class="field"><span>Infill (%)</span><input id="qInfill" type="number" min="0" max="100" step="5"></label>
+          <label class="field"><span>Walls</span><input id="qWalls" type="number" min="1" max="20" step="1"></label>
+          <label class="field"><span>Supports</span>
+            <select id="qSupport">
+              <option value="off">Off</option>
+              <option value="normal">Normal (auto)</option>
+              <option value="tree">Tree (auto)</option>
+            </select>
+          </label>
+          <label class="field"><span>Brim</span>
+            <select id="qBrim">
+              <option value="auto_brim">Auto</option>
+              <option value="no_brim">Off</option>
+              <option value="outer_only">On (outside only)</option>
+            </select>
+          </label>
+        </div>
+        <div class="row-actions">
+          <button id="resetQuick" class="link" type="button">Reset to profile values</button>
+          <button id="importPreset" class="link" type="button">Import OrcaSlicer preset…</button>
+          <input id="presetFile" type="file" accept=".json,application/json" multiple hidden>
+        </div>
+      </section>
+      </div>
+
+      <section class="panel slice-panel">
+        <button id="sliceBtn" class="primary big" type="button" disabled>Slice plate</button>
+        <div id="progress" class="progress" hidden>
+          <div class="progress-bar"><div id="progressFill"></div></div>
+          <div class="progress-row"><span id="progressText">Starting…</span><button id="cancelBtn" class="link" type="button">Cancel</button></div>
+        </div>
+        <div id="result" class="result" hidden>
+          <dl>
+            <div><dt>Print time</dt><dd id="rTime">–</dd></div>
+            <div><dt>Filament</dt><dd id="rFilament">–</dd></div>
+          </dl>
+          <button id="downloadBtn" class="primary" type="button">Download G-code</button>
+          <p class="hint" id="rNote"></p>
+        </div>
+        <p id="message" class="message" role="status" hidden></p>
+      </section>
+    </aside>
+
+    <section class="stage">
+      <div class="stage-toolbar">
+        <div class="tabs" role="tablist">
+          <button id="tabPrepare" role="tab" aria-selected="true" class="tab active" type="button">Prepare</button>
+          <button id="tabPreview" role="tab" aria-selected="false" class="tab" type="button" disabled>Preview</button>
+        </div>
+        <div class="tools" id="prepareTools">
+          <button id="addBtn" type="button" class="primary">Add model</button>
+          <input id="modelFile" type="file" multiple hidden>
+          <button id="arrangeBtn" type="button" title="Arrange all models on the plate">Arrange</button>
+          <button id="orientBtn" type="button" title="Let OrcaSlicer pick the best orientation for every model">Auto-orient</button>
+          <span class="sep"></span>
+          <button id="rotX" type="button" class="icon" title="Rotate selected 90° around X">X↻</button>
+          <button id="rotY" type="button" class="icon" title="Rotate selected 90° around Y">Y↻</button>
+          <button id="rotZ" type="button" class="icon" title="Rotate selected 90° around Z">Z↻</button>
+          <label class="scale" title="Scale selected model"><input id="scaleInput" type="number" min="1" max="2000" step="5" value="100"><span>%</span></label>
+          <button id="dupBtn" type="button" title="Duplicate selected">Copy</button>
+          <button id="delBtn" type="button" title="Delete selected">Delete</button>
+        </div>
+      </div>
+
+      <div id="viewport" class="viewport">
+        <div id="dropHint" class="drop-hint">
+          <p><strong>Drop STL, 3MF, OBJ or STEP files here</strong></p>
+          <p>or use <em>Add model</em>. Files stay on this computer.</p>
+        </div>
+        <div id="layerControls" class="layer-controls" hidden>
+          <input id="layerSlider" type="range" min="1" max="1" value="1" aria-label="Layer">
+          <span id="layerLabel">Layer 1</span>
+        </div>
+        <ul id="legend" class="legend" hidden></ul>
+      </div>
+
+      <div class="objectbar" id="objectBar" hidden>
+        <ul id="objectList"></ul>
+        <span id="selectionInfo" class="hint"></span>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="aboutDialog">
+    <form method="dialog">
+      <h2>About Orca Web Slicer</h2>
+      <p>This page runs the <a href="https://github.com/OrcaSlicer/OrcaSlicer" target="_blank" rel="noopener">OrcaSlicer</a>
+        slicing engine inside your browser using WebAssembly
+        (<a href="https://github.com/Hiosdra/OrcaWeb" target="_blank" rel="noopener">OrcaWeb engine build</a>).
+        Your models are sliced on this computer and are never uploaded. The page has no connection to any printer:
+        download the G-code and copy it to your printer.</p>
+      <p id="aboutVersions" class="hint"></p>
+      <p class="hint">OrcaSlicer and this site are licensed under the GNU Affero General Public License v3.0.
+        Source code for this site: <a id="sourceLink" href="#" target="_blank" rel="noopener">source</a>.
+        Third-party notices are in <a href="NOTICE.md" target="_blank">NOTICE.md</a>.</p>
+      <div class="dialog-actions"><button class="primary" value="close">Close</button></div>
+    </form>
+  </dialog>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

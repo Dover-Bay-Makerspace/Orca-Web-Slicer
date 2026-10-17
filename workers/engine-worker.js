@@ -1,0 +1,205 @@
+/* OrcaSlicer engine worker.
+ *
+ * Loads the OrcaSlicer WebAssembly engine (engine/slicer-mt.js + .wasm, built
+ * by the OrcaWeb project) and runs every engine call off the page's main
+ * thread. The engine spawns its own helper threads, which is why the page has
+ * to be cross-origin isolated (see README).
+ *
+ * Messages in:  { id, type, ...payload }
+ * Messages out: { id, ok: true, result } | { id, ok: false, error: {code,message} }
+ *               { type: 'progress', id, percent, stage }  (during slice)
+ *               { type: 'log', message }                   (engine stderr)
+ */
+'use strict';
+
+const ENGINE_BASE = new URL('../engine/', self.location.href).href;
+const ENGINE_SCRIPT = ENGINE_BASE + 'slicer-mt.js';
+
+let enginePromise = null;
+let capabilities = null;
+const abortControllers = new Map();
+
+function post(message, transfer) {
+  self.postMessage(message, transfer || []);
+}
+
+function errorPayload(error) {
+  return {
+    code: (error && error.code) || 'ERROR',
+    message: (error && error.message) || String(error),
+  };
+}
+
+async function loadEngine() {
+  if (enginePromise) return enginePromise;
+  enginePromise = (async () => {
+    if (!self.crossOriginIsolated) {
+      const e = new Error('This page is not cross-origin isolated, so the multithreaded slicing engine cannot start. ' +
+        'The web server must send the COOP/COEP headers described in the README.');
+      e.code = 'NOT_ISOLATED';
+      throw e;
+    }
+    try {
+      importScripts(ENGINE_SCRIPT);
+    } catch (err) {
+      const e = new Error('The slicing engine files are missing. Put slicer-mt.js and slicer-mt.wasm in the engine/ ' +
+        'folder (run tools/fetch-engine.sh or tools/fetch-engine.ps1).');
+      e.code = 'ENGINE_MISSING';
+      throw e;
+    }
+    if (typeof self.OneSlicerEngine === 'undefined') {
+      const e = new Error('engine/slicer-mt.js loaded but did not define OneSlicerEngine. Is it an OrcaWeb engine release?');
+      e.code = 'ENGINE_INVALID';
+      throw e;
+    }
+    const engine = await self.OneSlicerEngine.createEngine({
+      runtime: {
+        mainScriptUrlOrBlob: ENGINE_SCRIPT,
+        locateFile: (path) => ENGINE_BASE + path,
+        print: (m) => post({ type: 'log', message: String(m) }),
+        printErr: (m) => post({ type: 'log', message: String(m) }),
+      },
+    });
+    capabilities = engine.capabilities || null;
+    return engine;
+  })();
+  enginePromise.catch(() => { enginePromise = null; });
+  return enginePromise;
+}
+
+const encoder = new TextEncoder();
+const METADATA_KEYS = new Set([
+  'name', 'inherits', 'from', 'instantiation', 'setting_id', 'type', 'version', 'description',
+  'compatible_printers', 'compatible_printers_condition', 'compatible_prints', 'compatible_prints_condition',
+  'is_custom_defined', 'renamed_from', 'base_id', 'user_id', 'updated_time',
+]);
+
+function stripMetadata(settings) {
+  const out = {};
+  for (const [k, v] of Object.entries(settings || {})) {
+    if (METADATA_KEYS.has(k) || v === null || typeof v === 'object' && !Array.isArray(v)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+function isConfigError(error) {
+  return error && (error.code === 'CONFIG' || error.code === 'INPUT_FORMAT');
+}
+
+/* Apply a settings patch. The engine rejects a whole patch when one value is
+ * invalid, so on failure split the patch and find the offending keys; they are
+ * skipped and reported instead of stopping the slice. */
+async function applyRobust(session, format, settings, skipped) {
+  const keys = Object.keys(settings);
+  if (keys.length === 0) return;
+  try {
+    await session.applyProfile(format, encoder.encode(JSON.stringify(settings)));
+  } catch (error) {
+    if (!isConfigError(error)) throw error;
+    if (keys.length === 1) {
+      skipped.push({ key: keys[0], value: settings[keys[0]], reason: error.message });
+      return;
+    }
+    const half = Math.ceil(keys.length / 2);
+    const a = {}, b = {};
+    keys.forEach((k, i) => { (i < half ? a : b)[k] = settings[k]; });
+    await applyRobust(session, format, a, skipped);
+    await applyRobust(session, format, b, skipped);
+  }
+}
+
+async function configuredSession(engine, layers) {
+  const session = await engine.createSession();
+  // Start from OrcaSlicer's defaults, then apply printer -> process -> filament
+  // -> the user's quick settings, the same order the desktop app merges them.
+  await session.init(encoder.encode('{}'));
+  const skipped = [];
+  for (const layer of layers) {
+    await applyRobust(session, layer.format || 'orca.profile-json', stripMetadata(layer.settings), skipped);
+  }
+  return { session, skipped };
+}
+
+const handlers = {
+  async load() {
+    await loadEngine();
+    return { capabilities };
+  },
+
+  async convert({ kind, bytes }) {
+    const engine = await loadEngine();
+    const data = new Uint8Array(bytes);
+    let stl;
+    if (kind === 'obj') stl = await engine.objToStl(data);
+    else if (kind === 'step') stl = await engine.cadToStl(data);
+    else if (kind === '3mf') stl = await engine.threeMfToStl(data);
+    else throw Object.assign(new Error('Unsupported file type: ' + kind), { code: 'UNSUPPORTED' });
+    return { transfer: [stl.buffer], value: { stl: stl.buffer } };
+  },
+
+  async arrange({ id, layers, blob, manifest, operation }) {
+    const engine = await loadEngine();
+    const { session } = await configuredSession(engine, layers);
+    try {
+      await session.setObjects(new Uint8Array(blob), manifest);
+      const prepared = await session.prepare({ schemaVersion: manifest.schemaVersion, operation: operation || 'arrange' });
+      return { manifest: prepared };
+    } finally {
+      await session.dispose();
+    }
+  },
+
+  async slice({ id, layers, blob, manifest, plateId }) {
+    const engine = await loadEngine();
+    const { session, skipped } = await configuredSession(engine, layers);
+    const controller = new AbortController();
+    abortControllers.set(id, controller);
+    try {
+      await session.setObjects(new Uint8Array(blob), manifest);
+      const result = await session.slice({
+        schemaVersion: manifest.schemaVersion,
+        plateSelection: 'selected',
+        plateIds: [plateId],
+        includeGcode: true,
+        includeStatistics: true,
+      }, {
+        signal: controller.signal,
+        onProgress: (p) => post({ type: 'progress', id, percent: p.percent, stage: p.stage }),
+      });
+      const plate = (result.plateResults || [])[0];
+      const asset = plate && (plate.assets || []).find((a) => a.kind === 'gcode');
+      if (!asset) throw Object.assign(new Error('The engine finished but returned no G-code.'), { code: 'NO_DATA' });
+      const gcode = await session.getAsset(asset.id);
+      return {
+        transfer: [gcode.buffer],
+        value: { gcode: gcode.buffer, statistics: plate.statistics || null, skipped },
+      };
+    } finally {
+      abortControllers.delete(id);
+      await session.dispose();
+    }
+  },
+
+  async cancel({ target }) {
+    const c = abortControllers.get(target);
+    if (c) c.abort();
+    return { cancelled: !!c };
+  },
+};
+
+self.onmessage = async (event) => {
+  const msg = event.data || {};
+  const handler = handlers[msg.type];
+  if (!handler) {
+    post({ id: msg.id, ok: false, error: { code: 'UNKNOWN', message: 'Unknown request ' + msg.type } });
+    return;
+  }
+  try {
+    const out = await handler(msg);
+    if (out && out.transfer) post({ id: msg.id, ok: true, result: out.value }, out.transfer);
+    else post({ id: msg.id, ok: true, result: out });
+  } catch (error) {
+    post({ id: msg.id, ok: false, error: errorPayload(error) });
+  }
+};
