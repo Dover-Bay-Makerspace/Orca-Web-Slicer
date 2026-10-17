@@ -1,4 +1,12 @@
-yaml
+# Builds and publishes the site to GitHub Pages.
+#
+# On every push to main (or when run by hand from the Actions tab) this:
+#   1. downloads the newest prebuilt OrcaSlicer WebAssembly engine
+#   2. builds the printer/filament/process library from the matching
+#      OrcaSlicer release
+#   3. publishes everything to GitHub Pages
+#
+# One-time setup: repository Settings -> Pages -> Source: "GitHub Actions".
 name: Deploy site
 
 on:
