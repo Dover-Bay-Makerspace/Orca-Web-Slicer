@@ -151,8 +151,43 @@ function safeName(text) {
 const engine = new EngineClient();
 engine.onLog = (m) => console.debug('[engine]', m);
 
+/**
+ * The engine needs a cross-origin isolated page. On GitHub Pages that comes
+ * from coi-serviceworker.min.js, which may need a normal reload to take over
+ * (for example after Ctrl+Shift+R, which skips it). Reload up to twice.
+ */
+async function ensureIsolation() {
+  const KEY = 'orcaweb.isolationRetry';
+  const tries = +(sessionStorage.getItem(KEY) || 0);
+  if (window.crossOriginIsolated) { try { sessionStorage.removeItem(KEY); } catch { /* ignore */ } return true; }
+  if (!window.isSecureContext || !navigator.serviceWorker) return false;
+  try {
+    await Promise.race([navigator.serviceWorker.ready, new Promise((r) => setTimeout(r, 4000))]);
+  } catch { return false; }
+  if (window.crossOriginIsolated) return true;
+  if (tries < 2) {
+    try { sessionStorage.setItem(KEY, String(tries + 1)); } catch { return false; }
+    setEngineStatus('wait', 'Starting…');
+    window.location.reload();
+    await new Promise(() => {}); // the page is reloading
+  }
+  return false;
+}
+
+const NOT_ISOLATED_HELP = 'The slicer couldn\'t switch on a browser feature it needs (cross-origin isolation). '
+  + 'Press F5 to reload the page normally, or close the tab and open the site again. '
+  + 'Don\'t use a private/incognito window. If it keeps happening on school computers, the browser may be blocking '
+  + '"service workers" for this site; ask IT to allow them for this address.';
+
 async function startEngine() {
   setEngineStatus('wait', 'Engine loading…');
+  if (!(await ensureIsolation())) {
+    state.engineError = { code: 'NOT_ISOLATED', message: NOT_ISOLATED_HELP };
+    setEngineStatus('err', 'Engine unavailable', NOT_ISOLATED_HELP);
+    showMessage(NOT_ISOLATED_HELP, 'error');
+    updateButtons();
+    return;
+  }
   try {
     const { capabilities } = await engine.load();
     state.engineReady = true;
