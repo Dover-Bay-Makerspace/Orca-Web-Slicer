@@ -1944,12 +1944,13 @@ window.addEventListener('drop', (e) => e.preventDefault());
     ui.sourceLink.href = cfg.sourceUrl || 'https://github.com/Hiosdra/OrcaWeb';
     ui.sourceLink.textContent = cfg.sourceUrl || 'github.com/Hiosdra/OrcaWeb';
     if (cfg.title) document.title = cfg.title;
+    state.siteVersion = cfg.version || '';
   } catch { /* optional */ }
   await initEditor();
   try {
     await initProfiles();
     ui.aboutVersions.textContent = `Profile library: OrcaSlicer ${state.index.orcaProfileVersion || ''} · ` +
-      `${state.index.vendors.length} brands`;
+      `${state.index.vendors.length} brands` + (state.siteVersion ? ` · site version ${state.siteVersion}` : '');
   } catch (error) {
     showMessage(`Could not load the printer profiles: ${errorText(error)}`, 'error');
   }

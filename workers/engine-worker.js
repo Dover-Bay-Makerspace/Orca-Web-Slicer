@@ -13,7 +13,10 @@
 'use strict';
 
 const ENGINE_BASE = new URL('../engine/', self.location.href).href;
-const ENGINE_SCRIPT = ENGINE_BASE + 'slicer-mt.js';
+// The deploy stamps this worker's URL with ?v=<version>; pass it on so the
+// engine's .js and .wasm always come from the same deploy.
+const VERSION_QUERY = self.location.search || '';
+const ENGINE_SCRIPT = ENGINE_BASE + 'slicer-mt.js' + VERSION_QUERY;
 
 let enginePromise = null;
 let capabilities = null;
@@ -55,7 +58,7 @@ async function loadEngine() {
     const engine = await self.OneSlicerEngine.createEngine({
       runtime: {
         mainScriptUrlOrBlob: ENGINE_SCRIPT,
-        locateFile: (path) => ENGINE_BASE + path,
+        locateFile: (path) => ENGINE_BASE + path + VERSION_QUERY,
         print: (m) => post({ type: 'log', message: String(m) }),
         printErr: (m) => post({ type: 'log', message: String(m) }),
       },
