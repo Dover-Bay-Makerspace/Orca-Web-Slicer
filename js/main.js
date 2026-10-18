@@ -7,6 +7,7 @@ import {
 } from './profiles.js';
 import { SettingsEditor, keyTabs } from './settings-editor.js';
 import { readProjectFile } from './project-io.js';
+import { MeshPaint, mapStates, paintStates } from './paint.js';
 import { makeZip } from './zip.js';
 import { flushVolume } from './flush.js';
 
@@ -30,7 +31,9 @@ const ui = Object.fromEntries([
   'qLayer', 'qInfill', 'qWalls', 'qSupport', 'qBrim', 'resetQuick', 'importPreset', 'presetFile', 'advBtn', 'advCount',
   'advPanel', 'sliceBtn', 'sliceAllBtn', 'progress', 'progressFill', 'progressText', 'cancelBtn', 'result', 'rPlate',
   'rTime', 'rFilament', 'downloadBtn', 'downloadAllBtn', 'rNote', 'message', 'tabPrepare', 'tabPreview', 'prepareTools',
-  'addBtn', 'modelFile', 'arrangeBtn', 'orientBtn', 'rotX', 'rotY', 'rotZ', 'rotateTool', 'layFlatTool', 'rotXDeg', 'rotYDeg', 'rotZDeg', 'rotReset', 'scaleInput', 'dupBtn', 'delBtn', 'viewport',
+  'addBtn', 'modelFile', 'arrangeBtn', 'orientBtn', 'rotX', 'rotY', 'rotZ', 'rotateTool', 'layFlatTool', 'paintTool', 'paintBar', 'paintColours', 'paintErase',
+  'paintBrushMode', 'paintFillMode', 'paintSize', 'paintSizeText', 'paintAngle', 'paintAngleText', 'paintSizeRow',
+  'paintAngleRow', 'paintUndo', 'paintClear', 'paintHint', 'rotXDeg', 'rotYDeg', 'rotZDeg', 'rotReset', 'scaleInput', 'dupBtn', 'delBtn', 'viewport',
   'dropHint', 'layerControls', 'layerSlider', 'layerLabel', 'legend', 'objectBar', 'objectList', 'selectionInfo',
   'fitBtn', 'plateBar', 'plateList', 'addPlateBtn', 'delPlateBtn', 'objPanel', 'objName', 'objPlate', 'addEnforcer', 'addBlocker',
   'partSection', 'partList', 'modList', 'modEdit', 'modTitle', 'modX', 'modY', 'modZ', 'modW', 'modD', 'modH', 'modDelete',
@@ -671,6 +674,16 @@ async function removeSlot(index) {
   for (const item of state.objects) {
     item.filament = shiftDown(item.filament);
     for (const p of item.parts || []) p.filament = shiftDown(p.filament);
+    if (item.paint?.size) {
+      // Paint in the removed filament goes back to the model's own colour.
+      for (const [i, str] of item.paint) {
+        const next = mapStates(str, (f) => (f === index + 1 ? 0 : f > index + 1 ? f - 1 : f));
+        if (next) item.paint.set(i, next); else item.paint.delete(i);
+      }
+      item.painter = null;
+      item.paintStates = null;
+      viewer.repaint(item);
+    }
     viewer.updateObject(item);
   }
   invalidateAll();
@@ -746,6 +759,7 @@ function renderSlots() {
   ui.slotHint.textContent = hint.trim();
   ui.slotHint.hidden = !hint;
   renderObjectPanel();
+  renderPaintBar();
 }
 
 function refreshModelColours() {
@@ -1014,11 +1028,17 @@ function deletePlate() {
 // ----------------------------------------------------------------- models --
 
 const viewer = new Viewer(ui.viewport);
+viewer.filamentColour = (n) => state.slots[n - 1]?.colour || PALETTE[(n - 1) % PALETTE.length];
 viewer.colourOf = (item, part = 0) => state.slots[((item.parts ? item.parts[part]?.filament : item.filament) || 1) - 1]?.colour || '#4F9DDE';
 
 /** Every filament a model uses (one per colour part). */
 function itemFilaments(item) {
-  return item.parts ? item.parts.map((p) => p.filament) : [item.filament];
+  const list = item.parts ? item.parts.map((p) => p.filament) : [item.filament];
+  if (item.paint?.size) {
+    if (!item.paintStates) item.paintStates = paintStates(item.paint);
+    for (const f of item.paintStates) if (f <= state.slots.length && !list.includes(f)) list.push(f);
+  }
+  return list;
 }
 
 // Multi-colour models: parts in one frame -> one engine object per colour.
@@ -1043,18 +1063,50 @@ async function prepareProjectColours(project) {
   const notes = [];
   for (const obj of project.objects) {
     if (!obj.colourParts) continue;
+    if (partsEngineReady()) {
+      // The paint engine prints parts like desktop OrcaSlicer: keep them exactly as they are.
+      const raw = rawParts(obj.colourParts);
+      obj.positions = raw.positions;
+      obj.parts = raw.parts;
+      obj.paint = raw.paint;
+      obj.filament = raw.parts[0].filament;
+      continue;
+    }
     showMessage('Preparing colours…');
     const result = await combineColourParts(obj.colourParts);
     obj.positions = result.positions;
     obj.parts = result.parts;
     obj.filament = result.parts[0].filament;
+    if (obj.paint?.length) {
+      obj.paint = null;
+      if (!notes.includes(PAINT_DROPPED)) notes.push(PAINT_DROPPED);
+    }
     for (const n of result.notes) if (!notes.includes(n)) notes.push(n);
   }
   return notes;
 }
 
-function newItem({ name, positions, plateId, modifiers = [], x, y, quaternion, scale, placed = false, filament = 1, parts = null }) {
+const PAINT_DROPPED = 'Painted colours on models made of several coloured parts were left out; this slicing engine can\'t print both.';
+
+/** Parts kept as they are (for the paint engine): one range per part, paint re-indexed. */
+function rawParts(parts) {
+  const total = parts.reduce((n, p) => n + p.positions.length, 0);
+  const positions = new Float32Array(total);
+  const out = [];
+  const paint = [];
+  let start = 0;
+  for (const p of parts) {
+    positions.set(p.positions, start);
+    for (const [i, str] of p.paint || []) paint.push([i + start / 9, str]);
+    out.push({ name: p.name, filament: p.filament, start, end: start + p.positions.length });
+    start += p.positions.length;
+  }
+  return { positions, parts: out, paint: paint.length ? paint : null };
+}
+
+function newItem({ name, positions, plateId, modifiers = [], x, y, quaternion, scale, placed = false, filament = 1, parts = null, paint = null }) {
   return {
+    paint: paint && paint.size ? new Map(paint) : null,
     parts: parts && parts.length > 1 ? parts.map((p) => ({ ...p, stl: null })) : null,
     id: 'obj-' + state.nextId++,
     name,
@@ -1150,7 +1202,7 @@ async function addMultiColourModel(meshes) {
   if (room > 1) await ensureSlots(Math.min(meshes.length, room));
   const parts = meshes.map((m, i) => ({ name: m.name, filament: Math.min(i + 1, state.slots.length), positions: m.positions }));
   showMessage('Preparing colours…');
-  const result = await combineColourParts(parts);
+  const result = partsEngineReady() ? { ...rawParts(parts), notes: [] } : await combineColourParts(parts);
   normalise(result.positions);
   const name = meshes[0].name + (meshes.length > 1 ? ` +${meshes.length - 1}` : '');
   const item = addItem(newItem({ name, positions: result.positions, parts: result.parts, filament: result.parts[0].filament }));
@@ -1175,7 +1227,8 @@ async function add3mfModels(bytes, fileName) {
     addItem(newItem({ name: fileName.replace(/\.[^.]+$/, ''), positions }));
     return;
   }
-  await ensureSlots(Math.max(1, ...project.objects.flatMap((o) => (o.colourParts || [o]).map((c) => c.filament || 1))));
+  await ensureSlots(Math.max(1, ...project.objects.flatMap((o) => (o.colourParts || [o]).map((c) => c.filament || 1)),
+    ...project.objects.flatMap((o) => [...paintStates(new Map(o.paint || []))])));
   const colourNotes = await prepareProjectColours(project);
   project.warnings.push(...colourNotes);
   const items = itemsFromProject(project, () => state.activePlate);
@@ -1205,6 +1258,7 @@ function itemsFromProject(project, plateFor) {
         plateId: plateFor(inst.plateIndex),
         filament: (obj.filament || 1) <= state.slots.length ? obj.filament || 1 : 1,
         parts: obj.parts ? obj.parts.map((p) => ({ ...p, filament: p.filament <= state.slots.length ? p.filament : 1 })) : null,
+        paint: obj.paint?.length ? new Map(obj.paint) : null,
         x: pos.x,
         y: pos.y,
         quaternion: q,
@@ -1280,6 +1334,7 @@ function selectedModifier() {
 }
 
 function objectsChanged() {
+  renderPaintBar();
   const onPlate = objectsOn(state.activePlate);
   ui.dropHint.hidden = viewer.mode !== 'prepare' || state.objects.length > 0;
   ui.objectBar.hidden = viewer.mode !== 'prepare' || onPlate.length === 0;
@@ -1363,6 +1418,113 @@ function setTool(tool) {
   viewer.setTool(viewer.tool === tool ? 'move' : tool);
 }
 
+// ------------------------------------------------------------- painting --
+
+const paintTool = { filament: 2, mode: 'brush', erase: false, size: 2, angle: 30, undo: [], stroke: null, pending: null };
+
+function painterFor(item) {
+  if (!item.paint) item.paint = new Map();
+  if (!item.painter || item.painter.paint !== item.paint || item.painter.positions !== item.positions) {
+    item.painter = new MeshPaint(item.positions, item.paint);
+  }
+  return item.painter;
+}
+
+const paintEngineReady = () => state.capabilities?.features?.['x.orcaweb.paint'] === 'supported';
+const partsEngineReady = () => state.capabilities?.features?.['x.orcaweb.parts'] === 'supported';
+
+function renderPaintBar() {
+  const on = viewer.tool === 'paint' && viewer.mode === 'prepare';
+  ui.paintBar.hidden = !on;
+  if (!on) return;
+  if (paintTool.filament > state.slots.length) paintTool.filament = state.slots.length;
+  ui.paintColours.replaceChildren(...state.slots.map((slot, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.setAttribute('role', 'radio');
+    b.setAttribute('aria-checked', String(!paintTool.erase && paintTool.filament === i + 1));
+    b.title = `Paint with ${slotLabel(i)} (key ${i + 1})`;
+    b.textContent = String(i + 1);
+    b.style.background = slot.colour;
+    b.onclick = () => { paintTool.filament = i + 1; paintTool.erase = false; renderPaintBar(); };
+    return b;
+  }));
+  ui.paintErase.setAttribute('aria-pressed', String(paintTool.erase));
+  ui.paintBrushMode.setAttribute('aria-pressed', String(paintTool.mode === 'brush'));
+  ui.paintFillMode.setAttribute('aria-pressed', String(paintTool.mode === 'fill'));
+  ui.paintSizeRow.hidden = paintTool.mode !== 'brush';
+  ui.paintAngleRow.hidden = paintTool.mode !== 'fill';
+  ui.paintSizeText.textContent = `${paintTool.size} mm`;
+  ui.paintAngleText.textContent = `${paintTool.angle}°`;
+  ui.paintUndo.disabled = !paintTool.undo.length;
+  const hints = [];
+  if (state.slots.length < 2) {
+    hints.push(maxSlots() < 2
+      ? 'This printer uses one filament, so painted colours won\'t print. Pick a printer with an AMS, MMU or several tool heads.'
+      : 'Add a second filament in the Filament list, then paint with it.');
+  } else {
+    hints.push(paintTool.mode === 'brush' ? 'Drag on a model to paint. Shift+drag erases. Keys 1–9 pick a filament.'
+      : 'Click a face to fill it. Shift+click erases.');
+  }
+  if (!paintEngineReady()) hints.push('This slicing engine doesn\'t print paint yet, so painted models print in their own colour (see the README to switch to the paint engine).');
+  ui.paintHint.textContent = hints.join(' ');
+}
+
+function applyPaint(detail) {
+  const item = state.objects.find((o) => o.id === detail.id);
+  if (!item) return;
+  if (detail.phase === 'start') paintTool.stroke = { item, changed: new Map() };
+  const stroke = paintTool.stroke;
+  if (!stroke || stroke.item !== item) return;
+  if (detail.phase === 'end') {
+    paintTool.stroke = null;
+    if (stroke.changed.size) {
+      paintTool.undo.push(stroke);
+      if (paintTool.undo.length > 30) paintTool.undo.shift();
+      item.paintStates = null;
+      invalidatePlate(item.plateId);
+      objectsChanged();
+      renderPaintBar();
+    }
+    return;
+  }
+  const value = paintTool.erase || detail.erase ? 0 : paintTool.filament;
+  const painter = painterFor(item);
+  if (paintTool.mode === 'fill') {
+    if (detail.phase === 'start') painter.fill(detail.triangle, value, paintTool.angle, stroke.changed);
+  } else {
+    painter.brush(detail.point, detail.radius, value, undefined, stroke.changed);
+  }
+  // Redraw at most once per frame while dragging.
+  if (!paintTool.pending) {
+    paintTool.pending = requestAnimationFrame(() => { paintTool.pending = null; viewer.repaint(item); });
+  }
+}
+
+function undoPaint() {
+  const last = paintTool.undo.pop();
+  if (!last) return;
+  painterFor(last.item).restore(last.changed);
+  last.item.paintStates = null;
+  viewer.repaint(last.item);
+  invalidatePlate(last.item.plateId);
+  objectsChanged();
+  renderPaintBar();
+}
+
+function clearPaint() {
+  const item = selected();
+  if (!item?.paint?.size) return;
+  const changed = new Map(item.paint);
+  painterFor(item).restore(new Map([...changed.keys()].map((k) => [k, undefined])));
+  paintTool.undo.push({ item, changed });
+  item.paintStates = null;
+  viewer.repaint(item);
+  invalidatePlate(item.plateId);
+  objectsChanged();
+  renderPaintBar();
+}
+
 function scaleSelected(percent) {
   const item = selected();
   if (!item || !Number.isFinite(percent) || percent <= 0) return;
@@ -1397,6 +1559,7 @@ function duplicateSelected() {
     modifiers: item.modifiers.map((m) => ({ ...m, id: 'mod-' + state.nextId++, matrix: m.matrix.clone() })),
     filament: item.filament,
     parts: item.parts,
+    paint: item.paint,
   });
   copy.stl = item.stl;
   addItem(copy);
@@ -1575,23 +1738,62 @@ function buildProject(plateIds, shift = null, { split = true } = {}) {
   const objects = [];
   const instances = [];
   const modifierVolumes = [];
+  const multi = state.slots.length > 1;
+  const sendPaint = split && multi && paintEngineReady();
+  const nativeParts = split && partsEngineReady();
+  // Paint for the triangles [first, first + count) of a model, as OrcaSlicer strings, on that mesh.
+  const attachPaint = (item, meshId, first, count) => {
+    if (!sendPaint || !item.paint?.size) return;
+    const list = [];
+    const n = state.slots.length;
+    const tooHigh = [...(item.paintStates ||= paintStates(item.paint))].some((f) => f > n);
+    for (const [i, str] of item.paint) {
+      if (i < first || i >= first + count) continue;
+      // Paint in a filament that isn't in the list prints in the model's own filament.
+      const s = tooHigh ? mapStates(str, (f) => (f > n ? 0 : f)) : str;
+      if (s) list.push([i - first, s]);
+    }
+    if (!list.length) return;
+    list.sort((a, b) => a[0] - b[0]);
+    const data = new TextEncoder().encode(JSON.stringify(list));
+    meshes.find((m) => m.id === meshId).orcaPaint = { dataRange: { offset, length: data.length } };
+    chunks.push(data);
+    offset += data.length;
+  };
   for (const item of items) {
     const geometry = viewer.objects.get(item.id).mesh.geometry;
     const matrix = toRowMajor(toEngine ? toEngine.clone().multiply(instanceMatrix(item, geometry)) : instanceMatrix(item, geometry));
+    // Painted meshes get their own mesh entry (copies may be painted differently).
+    const painted = sendPaint && item.paint?.size;
     if (split && item.parts) {
-      // A multi-colour model: one engine object per colour, all placed the same way.
-      item.parts.forEach((part, i) => {
+      const partMesh = (part, i) => {
         const positions = item.positions.subarray(part.start, part.end);
         if (!part.stl) part.stl = toBinaryStl(positions);
-        const id = i ? `${item.id}-p${i}` : item.id;
-        objects.push({ id, meshId: addMesh(positions, part, part.stl), label: `${item.name} (${i + 1})`.slice(0, 200),
-          extruderId: state.slots.length > 1 ? part.filament : 0 });
-        instances.push({ id: 'inst-' + id, objectId: id, plateId: item.plateId, transform: { matrix } });
-      });
+        const meshId = addMesh(positions, painted ? `${item.id}#${i}` : part, part.stl);
+        attachPaint(item, meshId, part.start / 9, (part.end - part.start) / 9);
+        return meshId;
+      };
+      if (nativeParts) {
+        // Paint engine: one object made of colour parts, like desktop OrcaSlicer.
+        const [main, ...rest] = item.parts;
+        objects.push({
+          id: item.id, meshId: partMesh(main, 0), label: item.name.slice(0, 200), extruderId: multi ? main.filament : 0,
+          parts: rest.map((part, i) => ({ meshId: partMesh(part, i + 1), extruderId: multi ? part.filament : 0 })),
+        });
+        instances.push({ id: 'inst-' + item.id, objectId: item.id, plateId: item.plateId, transform: { matrix } });
+      } else {
+        // One engine object per colour, all placed the same way.
+        item.parts.forEach((part, i) => {
+          const id = i ? `${item.id}-p${i}` : item.id;
+          objects.push({ id, meshId: partMesh(part, i), label: `${item.name} (${i + 1})`.slice(0, 200), extruderId: multi ? part.filament : 0 });
+          instances.push({ id: 'inst-' + id, objectId: id, plateId: item.plateId, transform: { matrix } });
+        });
+      }
     } else {
       if (!item.stl) item.stl = toBinaryStl(item.positions);
-      const meshId = addMesh(item.positions, item.positions, item.stl);
-      objects.push({ id: item.id, meshId, label: item.name.slice(0, 200), extruderId: state.slots.length > 1 ? item.filament : 0 });
+      const meshId = addMesh(item.positions, painted ? item.id : item.positions, item.stl);
+      attachPaint(item, meshId, 0, item.positions.length / 9);
+      objects.push({ id: item.id, meshId, label: item.name.slice(0, 200), extruderId: multi ? item.filament : 0 });
       instances.push({ id: 'inst-' + item.id, objectId: item.id, plateId: item.plateId, transform: { matrix } });
     }
     for (const mod of item.modifiers) {
@@ -1695,7 +1897,10 @@ async function slice(all = false) {
     showMessage(`Move ${outside.map((o) => o.name).join(', ')}${where} inside the printable area first (shown in red), or use Arrange.`, 'error');
     return;
   }
-  showMessage('');
+  const painted = state.objects.some((o) => plateIds.includes(o.plateId) && o.paint?.size);
+  showMessage(painted && !paintEngineReady()
+    ? 'Note: this slicing engine doesn\'t print painted colours yet, so painted models print in their own filament.'
+    : painted && state.slots.length < 2 ? 'Note: painted colours need two or more filaments in the Filament list.' : '');
   ui.progress.hidden = false;
   ui.progressFill.style.width = '0%';
   ui.progressText.textContent = 'Preparing…';
@@ -1933,7 +2138,7 @@ function updateButtons() {
   ui.tabPreview.disabled = !r || r.stale;
   for (const b of [ui.rotX, ui.rotY, ui.rotZ, ui.rotXDeg, ui.rotYDeg, ui.rotZDeg, ui.rotReset, ui.dupBtn, ui.delBtn, ui.scaleInput]) b.disabled = !sel || busy;
   const hasModels = state.objects.some((o) => o.plateId === state.activePlate);
-  for (const b of [ui.rotateTool, ui.layFlatTool]) b.disabled = !hasModels || busy;
+  for (const b of [ui.rotateTool, ui.layFlatTool, ui.paintTool]) b.disabled = !hasModels || busy;
 }
 
 // --------------------------------------------------------------- projects --
@@ -1995,7 +2200,8 @@ const openProject = withBusy(async (file) => {
   state.plates = [];
   state.nextPlate = 1;
   const plateIds = project.plates.map((p) => addPlate(p.name).id);
-  const needed = Math.max(1, ...project.objects.flatMap((o) => (o.colourParts || [o]).map((c) => c.filament || 1)));
+  const needed = Math.max(1, ...project.objects.flatMap((o) => (o.colourParts || [o]).map((c) => c.filament || 1)),
+    ...project.objects.flatMap((o) => [...paintStates(new Map(o.paint || []))]));
   if (needed > state.slots.length) {
     const before = state.slots.length;
     await ensureSlots(needed);
@@ -2127,6 +2333,14 @@ ui.addBtn.onclick = () => ui.modelFile.click();
 ui.modelFile.onchange = withBusy(async () => { await addFiles(ui.modelFile.files); ui.modelFile.value = ''; objectsChanged(); });
 ui.arrangeBtn.onclick = () => arrange('arrange');
 ui.orientBtn.onclick = () => arrange('auto-orient');
+ui.paintTool.onclick = () => setTool('paint');
+ui.paintErase.onclick = () => { paintTool.erase = !paintTool.erase; renderPaintBar(); };
+ui.paintBrushMode.onclick = () => { paintTool.mode = 'brush'; renderPaintBar(); };
+ui.paintFillMode.onclick = () => { paintTool.mode = 'fill'; renderPaintBar(); };
+ui.paintSize.oninput = () => { paintTool.size = +ui.paintSize.value; viewer.brushRadius = paintTool.size; renderPaintBar(); };
+ui.paintAngle.oninput = () => { paintTool.angle = +ui.paintAngle.value; renderPaintBar(); };
+ui.paintUndo.onclick = undoPaint;
+ui.paintClear.onclick = clearPaint;
 ui.rotateTool.onclick = () => setTool('rotate');
 ui.layFlatTool.onclick = () => setTool('layflat');
 for (const inp of [ui.rotXDeg, ui.rotYDeg, ui.rotZDeg]) inp.addEventListener('change', setRotationFromInputs);
@@ -2200,7 +2414,10 @@ viewer.addEventListener('select', () => objectsChanged());
 viewer.addEventListener('tool', (e) => {
   ui.rotateTool.setAttribute('aria-pressed', String(e.detail.tool === 'rotate'));
   ui.layFlatTool.setAttribute('aria-pressed', String(e.detail.tool === 'layflat'));
+  ui.paintTool.setAttribute('aria-pressed', String(e.detail.tool === 'paint'));
+  renderPaintBar();
 });
+viewer.addEventListener('paint', (e) => applyPaint(e.detail));
 viewer.addEventListener('move', (e) => {
   if (e.detail.live) {
     if (e.detail.rotated) { const item = selected(); if (item) renderRotation(item); }
@@ -2215,9 +2432,14 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && editor?.isOpen) { editor.close(); return; }
   if (e.target.closest('input, select, textarea') || viewer.mode !== 'prepare') return;
   if (e.key === 'Delete' || e.key === 'Backspace') { deleteSelected(); e.preventDefault(); }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && viewer.tool === 'paint') { undoPaint(); e.preventDefault(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (viewer.tool === 'paint' && /^[1-9]$/.test(e.key) && +e.key <= state.slots.length) {
+    paintTool.filament = +e.key; paintTool.erase = false; renderPaintBar(); return;
+  }
   if (e.key === 'r' || e.key === 'R') setTool('rotate');
   if (e.key === 'f' || e.key === 'F') setTool('layflat');
+  if (e.key === 'n' || e.key === 'N') setTool('paint');
   if (e.key === 'Escape' && viewer.tool !== 'move') viewer.setTool('move');
 });
 

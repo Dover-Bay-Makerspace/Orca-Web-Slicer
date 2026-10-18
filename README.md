@@ -142,8 +142,16 @@ Hover over the pill to see the full error message.
   uses both colours: quick on a tool-changer, more filament changes and
   purging on an AMS. Floating parts without a flat underside (eyes set into
   a head) use the main colour.
-- **Limits:** colour painting with the brush, painted supports or seams, and
-  per-model setting modifiers aren't available. Adding a .3mf
+- **Colour painting (Paint button or N):** pick a filament and drag over a
+  model, or use **Fill** to colour a whole face; Shift erases, keys 1–9 pick
+  a filament, Ctrl+Z undoes. Paint is stored the way OrcaSlicer and Bambu
+  Studio store it, so painted 3MF files open with their colours. Painted
+  colours only print with the **paint engine**: a copy of the web engine with
+  a small change (see `engine-patch/README.md` for the one-time setup).
+  With the paint engine, multi-colour models are also printed as proper
+  parts (no columns down to the bed).
+- **Limits:** painted supports or seams and per-model setting modifiers
+  aren't available. Adding a .3mf
   with **Add model** brings in just its models. Use **Open project…** to also
   load its plates and settings.
 - **Turning models:** select a model, then use **Rotate** (or press R) and
@@ -198,6 +206,7 @@ tools/fetch-engine.sh/.ps1  download the engine
 tools/build-profiles.py     build profiles/ from an OrcaSlicer checkout
 tools/build-settings-schema.py  build settings-schema.json (Advanced settings) from OrcaSlicer's source
 custom-printers/            your own printer/print/filament presets ("My printers")
+engine-patch/               engine change for colour painting (build it in your OrcaWeb fork)
 tools/serve.py              local test server with the right headers
 .github/workflows/deploy.yml  GitHub Pages build and publish
 tests/                      headless browser test with a stand-in engine

@@ -172,12 +172,17 @@ function parseModel(text, path, warnings) {
         verts.push(+va.x * scale, +va.y * scale, +va.z * scale);
       }
       const tris = [];
+      const paint = [];
       const tre = /<triangle\b([^>]*)\/?>/g;
       let t;
       while ((t = tre.exec(body))) {
         const ta = attrs(t[1]);
+        // Colour painting (OrcaSlicer / Bambu Studio: paint_color, PrusaSlicer: slic3rpe:mmu_segmentation).
+        const pc = ta.paint_color || ta['slic3rpe:mmu_segmentation'];
+        if (pc) paint.push([tris.length / 3, pc.toUpperCase()]);
         tris.push(+ta.v1, +ta.v2, +ta.v3);
       }
+      obj.paint = paint.length ? paint : null;
       const pos = new Float32Array(tris.length * 3);
       let bad = 0;
       for (let i = 0; i < tris.length; i++) {
@@ -315,7 +320,7 @@ async function readProject(buffer, fallbackBed) {
     if (!obj) { warnings.push(`Object ${id} is missing from ${path}`); return; }
     if (obj.mesh && obj.mesh.length) {
       const pos = transformPositions(obj.mesh, matrix);
-      if (partType === 'normal_part' || !partType) out.normal.push({ positions: pos, extruder });
+      if (partType === 'normal_part' || !partType) out.normal.push({ positions: pos, extruder, paint: obj.paint });
       else if (partType === 'support_enforcer' || partType === 'support_blocker') {
         out.modifiers.push({ role: partType === 'support_enforcer' ? 'support-enforcer' : 'support-blocker', positions: pos });
       } else if (partType === 'modifier_part') skipped.modifier_part++;
@@ -356,19 +361,31 @@ async function readProject(buffer, fallbackBed) {
       const name = (ms && ms.name) || src.name || 'Object ' + item.objectid;
       // Parts in different filaments are kept as colour parts; the page turns
       // them into one object per colour (see parts-worker.js).
+      // Paint is per triangle, so it follows the triangles when parts are joined.
+      const joined = (parts) => {
+        const paint = [];
+        let tri = 0;
+        for (const p of parts) {
+          for (const [i, str] of p.paint || []) paint.push([i + tri, str]);
+          tri += p.positions.length / 9;
+        }
+        return { positions: concat(parts.map((p) => p.positions)), paint: paint.length ? paint : null };
+      };
       const byFilament = new Map();
       for (const part of out.normal) {
         const ext = part.extruder || objExtruder;
         if (!byFilament.has(ext)) byFilament.set(ext, []);
-        byFilament.get(ext).push(part.positions);
+        byFilament.get(ext).push(part);
       }
+      const whole = joined(out.normal);
       const list = [{
         sourceId: item.objectid,
         name,
         filament: objExtruder,
-        positions: concat(out.normal.map((p) => p.positions)),
+        positions: whole.positions,
+        paint: whole.paint,
         colourParts: byFilament.size > 1
-          ? [...byFilament.entries()].map(([ext, parts]) => ({ name: `${name} · filament ${ext}`, filament: ext, positions: concat(parts) }))
+          ? [...byFilament.entries()].map(([ext, parts]) => ({ name: `${name} · filament ${ext}`, filament: ext, ...joined(parts) }))
           : null,
         modifiers: out.modifiers,
         instances: [],

@@ -6,6 +6,7 @@ import { OrbitControls } from 'three/addons/OrbitControls.js';
 import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+import { expand } from './paint.js';
 
 const COLORS = {
   model: 0x4f9dde,
@@ -177,25 +178,79 @@ export class Viewer extends EventTarget {
   // ---------------------------------------------------------- models ----
 
   addObject(item) {
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(item.positions, 3));
-    geo.computeVertexNormals();
-    geo.computeBoundingBox();
-    const makeMat = () => new THREE.MeshStandardMaterial({ color: COLORS.model, roughness: 0.55, metalness: 0.05, flatShading: true });
-    let mat = makeMat();
-    if (item.parts) {
-      // A multi-colour model: one material per colour part.
-      mat = item.parts.map(makeMat);
-      item.parts.forEach((p, i) => geo.addGroup(p.start / 3, (p.end - p.start) / 3, i));
-    }
-    const mesh = new THREE.Mesh(geo, mat);
+    const mat = new THREE.MeshStandardMaterial({ color: COLORS.model, roughness: 0.55, metalness: 0.05, flatShading: true });
+    const mesh = new THREE.Mesh(new THREE.BufferGeometry(), mat);
     mesh.userData.id = item.id;
     mesh.matrixAutoUpdate = false;
     this.modelGroup.add(mesh);
-    this.objects.set(item.id, { mesh, item, modifiers: new Map() });
+    const o = { mesh, item, modifiers: new Map(), paintVersion: 0 };
+    this.objects.set(item.id, o);
+    this.#setDisplay(o);
     for (const m of item.modifiers || []) this.addModifier(item, m);
     this.updateObject(item);
     this.applyPlateVisibility();
+  }
+
+  /**
+   * (Re)build what is drawn for a model: its triangles, with painted triangles
+   * split into their painted pieces. Colour parts and paint use per-vertex colours.
+   */
+  #setDisplay(o) {
+    const item = o.item;
+    let positions = item.positions, states = null, source = null;
+    if (item.paint && item.paint.size) ({ positions, states, source } = expand(item.positions, item.paint));
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.computeVertexNormals();
+    geo.computeBoundingBox();
+    if (states || item.parts) geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(positions.length), 3));
+    geo.userData = { states, source };
+    const old = o.mesh.geometry;
+    o.mesh.geometry = geo;
+    old.dispose();
+    o.mesh.material.vertexColors = !!geo.attributes.color;
+    o.mesh.material.needsUpdate = true;
+    o.colourKey = null;
+  }
+
+  /** Redraw a model after its paint changed. */
+  repaint(item) {
+    const o = this.objects.get(item.id);
+    if (!o) return;
+    o.paintVersion++;
+    this.#setDisplay(o);
+    this.updateObject(item);
+  }
+
+  /** Mesh triangle under a ray hit (painted triangles are drawn split). */
+  sourceTriangle(hit) {
+    const src = hit.object.geometry.userData?.source;
+    return src ? src[hit.faceIndex] : hit.faceIndex;
+  }
+
+  #vertexColours(o) {
+    const geo = o.mesh.geometry;
+    const attr = geo.attributes.color;
+    const item = o.item;
+    const { states, source } = geo.userData;
+    const fil = (n) => new THREE.Color(this.filamentColour ? this.filamentColour(n) : '#4f9dde');
+    const palette = Array.from({ length: 17 }, (_, n) => (n ? fil(n) : null));
+    const parts = item.parts || [{ start: 0, end: item.positions.length }];
+    const partColours = parts.map((_, i) => new THREE.Color(this.colourOf ? this.colourOf(item, i) : '#4f9dde'));
+    const key = palette.slice(1).map((c) => c.getHexString()).join() + partColours.map((c) => c.getHexString()).join() + o.paintVersion;
+    if (key === o.colourKey) return;
+    o.colourKey = key;
+    const arr = attr.array;
+    const triCount = arr.length / 9;
+    let part = 0;
+    for (let t = 0; t < triCount; t++) {
+      const src = source ? source[t] : t;
+      while (part < parts.length - 1 && src * 9 >= parts[part].end) part++;
+      while (part > 0 && src * 9 < parts[part].start) part--;
+      const c = states && states[t] ? palette[states[t]] : partColours[part];
+      for (let k = 0; k < 3; k++) { arr[t * 9 + k * 3] = c.r; arr[t * 9 + k * 3 + 1] = c.g; arr[t * 9 + k * 3 + 2] = c.b; }
+    }
+    attr.needsUpdate = true;
   }
 
   /** A support enforcer/blocker volume, drawn translucent and attached to its model. */
@@ -260,7 +315,7 @@ export class Viewer extends EventTarget {
     if (!o) return;
     this.modelGroup.remove(o.mesh);
     o.mesh.geometry.dispose();
-    for (const m of [].concat(o.mesh.material)) m.dispose();
+    o.mesh.material.dispose();
     this.objects.delete(id);
     if (this.selectedId === id) this.select(null);
   }
@@ -305,14 +360,19 @@ export class Viewer extends EventTarget {
   refreshColors() {
     for (const [id, o] of this.objects) {
       const inside = this.isInside(id);
-      [].concat(o.mesh.material).forEach((mat, part) => {
-        const own = this.colourOf ? this.colourOf(o.item, part) : null;
+      const mat = o.mesh.material;
+      if (o.mesh.geometry.attributes.color) {
+        this.#vertexColours(o);
+        mat.color.setHex(inside ? 0xffffff : 0xff6a6a);
+      } else {
+        const own = this.colourOf ? this.colourOf(o.item, 0) : null;
         if (!inside) mat.color.setHex(COLORS.outside);
         else if (own) mat.color.set(own);
         else mat.color.setHex(id === this.selectedId ? COLORS.selected : COLORS.model);
-        // The selected model glows orange so it stands out whatever its filament colour.
-        mat.emissive.setHex(id === this.selectedId ? 0x7a3c00 : 0x000000);
-      });
+      }
+      // The selected model glows orange so it stands out whatever its filament colour.
+      const glow = this.tool === 'paint' || o.mesh.geometry.attributes.color ? 0x2e1700 : 0x7a3c00;
+      mat.emissive.setHex(id === this.selectedId ? glow : 0x000000);
       for (const [mid, m] of o.modifiers) {
         const on = mid === this.selectedModifierId;
         m.material.opacity = on ? 0.6 : 0.32;
@@ -334,8 +394,10 @@ export class Viewer extends EventTarget {
   /** Pick the model tool: 'move', 'rotate' or 'layflat'. */
   setTool(tool) {
     this.tool = tool;
-    this.renderer.domElement.style.cursor = tool === 'layflat' ? 'crosshair' : '';
+    this.renderer.domElement.style.cursor = tool === 'layflat' || tool === 'paint' ? 'crosshair' : '';
+    if (tool !== 'paint' && this.brushCursor) this.brushCursor.visible = false;
     this.#placeGizmo();
+    this.refreshColors();
     this.dispatchEvent(new CustomEvent('tool', { detail: { tool } }));
   }
 
@@ -363,6 +425,14 @@ export class Viewer extends EventTarget {
       this.gizmoRings.push({ name, axis, colour, ring, grab });
     }
     this.scene.add(this.gizmo);
+    // Paint brush outline, shown on the surface under the pointer.
+    this.brushCursor = new THREE.Mesh(new THREE.RingGeometry(0.9, 1, 48),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true, opacity: 0.9, side: THREE.DoubleSide }));
+    this.brushCursor.renderOrder = 11;
+    this.brushCursor.visible = false;
+    this.brushCursor.raycast = () => {};
+    this.scene.add(this.brushCursor);
+    this.brushRadius = 2;
     this.hud = document.createElement('div');
     this.hud.className = 'rotate-hud';
     this.hud.hidden = true;
@@ -390,6 +460,34 @@ export class Viewer extends EventTarget {
     }
     this.hoverRing = name;
     this.needsRender = true;
+  }
+
+  /** Model hit under the pointer (models on the active plate, not support boxes). */
+  #modelHit(onlyId = null) {
+    const meshes = onlyId ? [this.objects.get(onlyId)?.mesh].filter(Boolean) : this.modelGroup.children.filter((m) => m.visible);
+    return this.raycaster.intersectObjects(meshes, false).find((h) => h.object.userData.id && !h.object.userData.modifierId) || null;
+  }
+
+  #moveBrush(hit) {
+    const c = this.brushCursor;
+    if (!hit || !hit.face) { if (c.visible) { c.visible = false; this.needsRender = true; } return; }
+    const n = hit.face.normal.clone().applyMatrix3(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize();
+    c.position.copy(hit.point).addScaledVector(n, 0.05);
+    c.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+    c.scale.setScalar(this.brushRadius);
+    c.visible = true;
+    this.needsRender = true;
+  }
+
+  #paintEvent(phase, hit, event) {
+    const local = hit.object.worldToLocal(hit.point.clone());
+    const s = hit.object.matrixWorld.getMaxScaleOnAxis() || 1;
+    this.dispatchEvent(new CustomEvent('paint', {
+      detail: {
+        phase, id: hit.object.userData.id, point: [local.x, local.y, local.z], triangle: this.sourceTriangle(hit),
+        radius: this.brushRadius / s, erase: event.shiftKey,
+      },
+    }));
   }
 
   /** Angle of the pointer around the gizmo centre on screen (radians, counter-clockwise). */
@@ -450,6 +548,18 @@ export class Viewer extends EventTarget {
           return;
         }
       }
+      if (this.tool === 'paint') {
+        const hit = this.#modelHit();
+        if (hit) {
+          if (hit.object.userData.id !== this.selectedId) this.select(hit.object.userData.id);
+          this.paintDrag = { id: hit.object.userData.id, pointerId: event.pointerId };
+          this.controls.enabled = false;
+          el.setPointerCapture(event.pointerId);
+          this.#paintEvent('start', hit, event);
+          downAt = null;
+          return;
+        }
+      }
       const visible = this.modelGroup.children.filter((m) => m.visible);
       const hits = this.raycaster.intersectObjects(visible, true).filter((h) => h.object.userData.id);
       if (hits.length && this.tool === 'layflat') {
@@ -477,6 +587,15 @@ export class Viewer extends EventTarget {
       }
     });
     el.addEventListener('pointermove', (event) => {
+      if (this.tool === 'paint' && this.mode === 'prepare' && !this.drag) {
+        if (this.paintDrag || event.buttons === 0) {
+          this.#pick(event);
+          const hit = this.#modelHit(this.paintDrag?.id);
+          this.#moveBrush(hit);
+          if (this.paintDrag && hit) this.#paintEvent('move', hit, event);
+        }
+        if (this.paintDrag) return;
+      }
       if (this.drag?.rotate) {
         const d = this.drag;
         const a = this.#screenAngle(event);
@@ -524,6 +643,15 @@ export class Viewer extends EventTarget {
       this.dispatchEvent(new CustomEvent('move', { detail: { id: o.item.id, live: true } }));
     });
     const end = (event) => {
+      if (this.paintDrag) {
+        const { id, pointerId } = this.paintDrag;
+        try { el.releasePointerCapture(pointerId); } catch { /* already released */ }
+        this.paintDrag = null;
+        this.controls.enabled = true;
+        this.dispatchEvent(new CustomEvent('paint', { detail: { phase: 'end', id } }));
+        downAt = null;
+        return;
+      }
       if (this.drag?.rotate) {
         const { id, moved } = this.drag;
         try { el.releasePointerCapture(this.drag.pointerId); } catch { /* already released */ }
@@ -549,6 +677,7 @@ export class Viewer extends EventTarget {
       }
       downAt = null;
     };
+    el.addEventListener('pointerleave', () => { if (!this.paintDrag && this.brushCursor?.visible) { this.brushCursor.visible = false; this.needsRender = true; } });
     el.addEventListener('pointerup', end);
     el.addEventListener('pointercancel', end);
   }

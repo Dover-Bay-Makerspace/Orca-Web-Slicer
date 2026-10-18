@@ -129,6 +129,7 @@
           <span class="sep"></span>
           <button id="rotateTool" type="button" class="tool-toggle" aria-pressed="false" title="Rotate: drag the coloured rings around the selected model, or type angles in its panel (R)">⟳ Rotate</button>
           <button id="layFlatTool" type="button" class="tool-toggle" aria-pressed="false" title="Lay flat: click a flat face of a model to put that face down on the bed (F)">⊥ Lay flat</button>
+          <button id="paintTool" type="button" class="tool-toggle" aria-pressed="false" title="Colour painting: paint filaments onto a model, like OrcaSlicer's Color Painting tool (N)">🖌 Paint</button>
           <label class="scale" title="Scale selected model"><input id="scaleInput" type="number" min="1" max="2000" step="5" value="100" aria-label="Scale (%)"><span>%</span></label>
           <button id="dupBtn" type="button" title="Duplicate selected">Copy</button>
           <button id="delBtn" type="button" title="Delete selected">Delete</button>
@@ -147,6 +148,24 @@
           <p>or use <em>Add model</em>. Files stay on this computer.</p>
         </div>
 
+        <div id="paintBar" class="paint-bar" hidden>
+          <div class="paint-row">
+            <span class="paint-label">Paint with</span>
+            <div id="paintColours" class="paint-colours" role="radiogroup" aria-label="Filament to paint with"></div>
+            <button id="paintErase" type="button" class="tool-toggle small" aria-pressed="false" title="Erase paint (or hold Shift while painting)">Erase</button>
+          </div>
+          <div class="paint-row">
+            <div class="seg" role="group" aria-label="Paint tool">
+              <button id="paintBrushMode" type="button" aria-pressed="true" title="Brush: drag over the model">Brush</button>
+              <button id="paintFillMode" type="button" aria-pressed="false" title="Fill: click to colour a whole face or smooth area">Fill</button>
+            </div>
+            <label class="paint-size" id="paintSizeRow">Size <input id="paintSize" type="range" min="0.5" max="15" step="0.5" value="2" aria-label="Brush size (mm)"><span id="paintSizeText">2 mm</span></label>
+            <label class="paint-size" id="paintAngleRow" hidden>Edge angle <input id="paintAngle" type="range" min="1" max="90" step="1" value="30" aria-label="Fill stops at edges sharper than this"><span id="paintAngleText">30°</span></label>
+            <button id="paintUndo" type="button" class="link" title="Undo the last stroke (Ctrl+Z)">Undo</button>
+            <button id="paintClear" type="button" class="link" title="Remove all paint from the selected model">Clear</button>
+          </div>
+          <p id="paintHint" class="hint"></p>
+        </div>
         <div id="objPanel" class="obj-panel" hidden>
           <div class="obj-head"><strong id="objName"></strong></div>
           <label class="field inline"><span>Plate</span><select id="objPlate"></select></label>

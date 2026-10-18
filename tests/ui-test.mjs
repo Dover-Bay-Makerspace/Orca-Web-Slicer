@@ -53,6 +53,22 @@ fs.writeFileSync(path.join(models, 'fob-base.stl'), boxStl(40, 20, 3, 50, 50, 0)
   both.writeUInt32LE(24, 80);
   fs.writeFileSync(path.join(models, 'fob-letters.stl'), both);
 }
+// A painted 3MF (OrcaSlicer / Bambu Studio "paint_color"): a 20 mm cube, top face painted filament 2,
+// one side painted with a split triangle (half filament 3).
+execFileSync('python3', ['-c', `
+import zipfile, sys
+v = [(0,0,0),(20,0,0),(20,20,0),(0,20,0),(0,0,20),(20,0,20),(20,20,20),(0,20,20)]
+f = [(0,2,1),(0,3,2),(4,5,6),(4,6,7),(0,1,5),(0,5,4),(1,2,6),(1,6,5),(2,3,7),(2,7,6),(3,0,4),(3,4,7)]
+paint = {2: '8', 3: '8', 4: '0C01'}
+verts = ''.join('<vertex x="%g" y="%g" z="%g"/>' % p for p in v)
+tris = ''.join('<triangle v1="%d" v2="%d" v3="%d"%s/>' % (a, b, c, (' paint_color="%s"' % paint[i]) if i in paint else '') for i, (a, b, c) in enumerate(f))
+model = ('<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">'
+  '<resources><object id="1" type="model" name="painted-cube"><mesh><vertices>' + verts + '</vertices><triangles>' + tris + '</triangles></mesh></object></resources>'
+  '<build><item objectid="1" transform="1 0 0 0 1 0 0 0 1 100 100 0"/></build></model>')
+with zipfile.ZipFile(sys.argv[1], 'w') as z:
+    z.writestr('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>')
+    z.writestr('3D/3dmodel.model', model)
+`, path.join(models, 'painted-cube.3mf')]);
 fs.writeFileSync(path.join(models, 'bracket.obj'), 'v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n');
 fs.writeFileSync(path.join(OUT, 'my-mk3s.json'), JSON.stringify({
   type: 'machine', name: 'My MK3S (classroom)', inherits: 'Prusa MK3S 0.4 nozzle', from: 'User', printable_height: '200',
@@ -551,6 +567,112 @@ try {
     await rctx.close();
   }
 
+  // Colour painting (N): brush, fill, undo, painted 3MF, and what reaches each engine.
+  {
+    const featureFile = path.join(site, 'engine/mock-features.json');
+    const openPainter = async (features) => {
+      if (features) fs.writeFileSync(featureFile, JSON.stringify(features)); else fs.rmSync(featureFile, { force: true });
+      const ctx = await browser.newContext({ viewport: { width: 1400, height: 860 }, acceptDownloads: true });
+      const pg = await ctx.newPage();
+      pg.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
+      pg.on('dialog', (d) => d.accept());
+      await pg.goto(`http://localhost:${port}/`);
+      await pg.waitForFunction(() => document.getElementById('engineStatus').textContent.includes('ready'), null, { timeout: 20000 });
+      await pg.waitForFunction(() => document.getElementById('printerSelect').options.length > 0);
+      await pg.selectOption('#vendorSelect', 'BBL');
+      await pg.waitForTimeout(500);
+      await pg.selectOption('#printerSelect', 'Bambu Lab X1 Carbon 0.4 nozzle');
+      await pg.waitForTimeout(500);
+      await pg.click('#addSlotBtn');
+      await pg.waitForSelector('#filamentSelect2');
+      return { ctx, pg };
+    };
+    const sliceText = async (pg) => {
+      await pg.click('#sliceBtn');
+      await pg.waitForSelector('#downloadBtn:not([disabled])', { state: 'visible', timeout: 30000 });
+      const [dl] = await Promise.all([pg.waitForEvent('download'), pg.click('#downloadBtn')]);
+      return fs.readFileSync(await dl.path(), 'utf8');
+    };
+    const topCentre = (pg) => pg.evaluate(() => {
+      const v = window.orcaWeb.viewer;
+      const id = [...v.objects.keys()][0];
+      const b = v.worldBox(id);
+      const rect = v.renderer.domElement.getBoundingClientRect();
+      const c = b.getCenter(b.min.clone()).setZ(b.max.z);
+      const p = c.clone().project(v.camera);
+      const q = c.clone().setX(c.x + 6).project(v.camera);
+      const scr = (u) => [rect.left + (u.x + 1) / 2 * rect.width, rect.top + (1 - u.y) / 2 * rect.height];
+      return [scr(p), scr(q)];
+    });
+    const paintInfo = (pg) => pg.evaluate(() => {
+      const item = window.orcaWeb.state.objects[0];
+      return { count: item.paint ? item.paint.size : 0, values: item.paint ? [...item.paint.values()] : [] };
+    });
+
+    // Plain engine: painting works in the page, the slice says it isn't printed.
+    let { ctx, pg } = await openPainter(null);
+    await pg.setInputFiles('#modelFile', [path.join(models, 'tall-box.stl')]);
+    await pg.waitForFunction(() => document.querySelectorAll('#objectList li').length === 1);
+    await pg.click('#objectList li button');
+    await pg.keyboard.press('n');
+    check('N opens colour painting', (await pg.getAttribute('#paintTool', 'aria-pressed')) === 'true' && await pg.isVisible('#paintBar')
+      && (await pg.$$('#paintColours button')).length === 2);
+    await pg.keyboard.press('2');
+    const [a, b] = await topCentre(pg);
+    await pg.mouse.move(...a);
+    await pg.mouse.down();
+    await pg.mouse.move(...b, { steps: 6 });
+    await pg.mouse.up();
+    await pg.waitForTimeout(200);
+    const brushed = await paintInfo(pg);
+    check('brush stroke paints the top of the model', brushed.count > 0 && brushed.values.every((v) => /^[0-9A-F]+$/.test(v)), JSON.stringify(brushed).slice(0, 200));
+    const colours = await pg.evaluate(() => {
+      const v = window.orcaWeb.viewer;
+      const o = [...v.objects.values()][0];
+      const c = o.mesh.geometry.attributes.color.array;
+      const set = new Set();
+      for (let i = 0; i < c.length; i += 9) set.add(c[i].toFixed(2) + ',' + c[i + 1].toFixed(2) + ',' + c[i + 2].toFixed(2));
+      return { colours: set.size, tris: c.length / 9 };
+    });
+    check('painted area is drawn in the filament colour', colours.colours === 2 && colours.tris > 12, JSON.stringify(colours));
+    await pg.screenshot({ path: path.join(OUT, '15-paint-brush.png') });
+    await pg.click('#paintFillMode');
+    await pg.mouse.click(...a);
+    await pg.waitForTimeout(200);
+    const filled = await paintInfo(pg);
+    check('fill paints the whole flat top', filled.count >= 2 && filled.values.filter((v) => v === '8').length >= 2, JSON.stringify(filled).slice(0, 200));
+    await pg.click('#paintUndo');
+    check('undo takes back the fill', JSON.stringify(await paintInfo(pg)) === JSON.stringify(brushed));
+    await pg.keyboard.press('Escape');
+    const plain = await sliceText(pg);
+    check('plain engine: paint not sent, and the page says so', plain.includes('; painted_triangles = 0')
+      && /doesn't print painted colours/.test(await msg(pg)), await msg(pg));
+    await ctx.close();
+
+    // Paint engine: paint and parts go to the engine as OrcaSlicer data.
+    ({ ctx, pg } = await openPainter({ 'x.orcaweb.paint': 'supported', 'x.orcaweb.parts': 'supported' }));
+    await pg.setInputFiles('#modelFile', [path.join(models, 'painted-cube.3mf')]);
+    await pg.waitForFunction(() => document.querySelectorAll('#objectList li').length === 1, null, { timeout: 15000 });
+    const imported = await paintInfo(pg);
+    check('painted 3MF opens with its paint', imported.count === 3 && imported.values.join(',') === '8,8,0C01', imported.values.join(','));
+    await pg.click('#objectList li button');
+    await pg.click('#fitBtn');
+    await pg.waitForTimeout(300);
+    await pg.screenshot({ path: path.join(OUT, '16-painted-3mf.png') });
+    const pt = await sliceText(pg);
+    check('paint engine: painted triangles and colours reach the engine', pt.includes('; painted_triangles = 3')
+      && pt.includes('; paint_states = 2,3') && /^T1$/m.test(pt), pt.split('\n').filter((l) => /painted|paint_states|^T\d/.test(l)).slice(0, 6).join(' | '));
+    await pg.click('#newBtn');
+    await pg.setInputFiles('#modelFile', [path.join(models, 'fob-base.stl'), path.join(models, 'fob-letters.stl')]);
+    await pg.waitForFunction(() => document.querySelectorAll('.part-row').length === 2, null, { timeout: 15000 });
+    const raw = await pg.evaluate(() => window.orcaWeb.state.objects[0].parts.map((p) => (p.end - p.start) / 9));
+    const pp = await sliceText(pg);
+    check('paint engine: colour parts kept as they are and sent as parts of one object', raw.join(',') === '12,24'
+      && pp.includes('; objects = 1') && pp.includes('; parts = 1') && /^T1$/m.test(pp) && !/extended down/.test(await msg(pg)), raw.join(',') + ' | ' + pp.split('\n').filter((l) => /; objects|; parts/.test(l)).join(' | '));
+    await ctx.close();
+    fs.rmSync(featureFile, { force: true });
+  }
+
   // Multi-colour model from one STL per colour (Tinkercad style), on an AMS and a tool-changer.
   {
     const cctx = await browser.newContext({ viewport: { width: 1400, height: 860 }, acceptDownloads: true });
@@ -577,7 +699,8 @@ try {
         const { state, viewer } = window.orcaWeb;
         const item = state.objects[0];
         const zs = (p) => { let mn = Infinity, mx = -Infinity; for (let i = 2; i < p.length; i += 3) { mn = Math.min(mn, p[i]); mx = Math.max(mx, p[i]); } return [mn, mx]; };
-        const mats = [].concat(viewer.objects.get(item.id).mesh.material).map((x) => x.color.getHexString());
+        const col = viewer.objects.get(item.id).mesh.geometry.attributes.color.array;
+        const mats = item.parts.map((p) => [0, 1, 2].map((k) => col[p.start + k].toFixed(2)).join(','));
         return { parts: item.parts.map((p) => ({ f: p.filament, tris: (p.end - p.start) / 9, z: zs(item.positions.subarray(p.start, p.end)) })), mats };
       });
       check(`${label}: letters reach the bed and are cut out of the base`, info.parts[0].f === 1 && info.parts[1].f === 2
@@ -617,9 +740,11 @@ try {
     sp.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
     sp.on('dialog', (d) => d.accept(d.type() === 'prompt' ? 'Classroom MK3S short' : undefined));
     await sp.goto(`http://localhost:${port}/`);
+    await sp.waitForFunction(() => document.getElementById('engineStatus').textContent.includes('ready'), null, { timeout: 20000 });
     await sp.waitForFunction(() => document.getElementById('printerSelect').options.length > 0, null, { timeout: 15000 });
+    await sp.waitForTimeout(300);
     await sp.selectOption('#printerSelect', 'Prusa MK3S 0.4 nozzle');
-    await sp.waitForTimeout(400);
+    await sp.waitForFunction(() => /250 × 210 × 210/.test(document.getElementById('bedInfo').textContent), null, { timeout: 10000 });
     await sp.click('#advBtn');
     await sp.click('.adv-tabs .tab[data-tab="machine"]');
     for (const b of await sp.$$('.adv-page')) { await b.click(); if (await sp.$('#adv-printable_height')) break; }
