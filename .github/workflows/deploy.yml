@@ -19,7 +19,7 @@ env:
   # Where the slicing engine comes from. "Hiosdra/OrcaWeb" is the standard
   # engine. After your own engine copy (with colour painting) has finished
   # building, change this to "Dover-Bay-Makerspace/OrcaWeb" and commit.
-  ENGINE_REPO: "Hiosdra/OrcaWeb"
+  ENGINE_REPO: "Dover-Bay-Makerspace/OrcaWeb"
 
 on:
   push:
