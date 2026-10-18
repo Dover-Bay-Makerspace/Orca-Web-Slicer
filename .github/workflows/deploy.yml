@@ -79,6 +79,24 @@ jobs:
           touch _site/.nojekyll
           du -sh _site
 
+      # Browsers keep site files for a few minutes. Stamping every script and
+      # stylesheet with this deploy's version makes them always load a
+      # matching set after an update (no mix of old and new files).
+      - name: Stamp file versions
+        run: |
+          V="${GITHUB_SHA::8}"
+          sed -i -E "s#(src=\"js/main\.js)\"#\1?v=$V\"#; s#(href=\"css/app\.css)\"#\1?v=$V\"#" _site/index.html
+          find _site/js _site/workers -name '*.js' -exec sed -i -E \
+            -e "s#(from '\./[A-Za-z0-9_-]+\.js)'#\1?v=$V'#g" \
+            -e "s#(new URL\('\.\./workers/[A-Za-z0-9_-]+\.js)'#\1?v=$V'#g" {} +
+          python3 - <<PY
+          import json
+          cfg = json.load(open("_site/config.json"))
+          cfg["version"] = "$V"
+          json.dump(cfg, open("_site/config.json", "w"), indent=2)
+          PY
+          grep -c "?v=$V" _site/index.html _site/js/*.js | head
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
