@@ -44,19 +44,23 @@ jobs:
           ENGINE_TAG: ${{ github.event.inputs.engine_tag }}
         run: bash tools/fetch-engine.sh
 
-      - name: Get OrcaSlicer profiles matching the engine
+      - name: Get OrcaSlicer profiles and settings list matching the engine
         run: |
           ORCA_VERSION="$(cat engine/ORCA_VERSION)"
           echo "OrcaSlicer $ORCA_VERSION"
           git clone --depth 1 --branch "$ORCA_VERSION" --filter=blob:none --sparse \
             https://github.com/OrcaSlicer/OrcaSlicer.git "$RUNNER_TEMP/orca"
           git -C "$RUNNER_TEMP/orca" sparse-checkout set --no-cone \
-            '/resources/profiles/*.json' '/resources/profiles/**/*.json'
+            '/resources/profiles/*.json' '/resources/profiles/**/*.json' \
+            '/src/libslic3r/PrintConfig.cpp' '/src/slic3r/GUI/Tab.cpp'
 
       - name: Build profile library
         run: |
           python3 tools/build-profiles.py --orca "$RUNNER_TEMP/orca" --out profiles \
             ${{ github.event.inputs.vendors && format('--vendors "{0}"', github.event.inputs.vendors) || '' }}
+
+      - name: Build Advanced settings list
+        run: python3 tools/build-settings-schema.py --orca "$RUNNER_TEMP/orca" --out settings-schema.json
 
       - name: Point the About box at this repository's source
         run: |
@@ -71,7 +75,7 @@ jobs:
       - name: Assemble site
         run: |
           mkdir -p _site
-          cp -r index.html config.json coi-serviceworker.min.js css js workers vendor engine profiles LICENSE NOTICE.md _site/
+          cp -r index.html config.json settings-schema.json coi-serviceworker.min.js css js workers vendor engine profiles LICENSE NOTICE.md _site/
           touch _site/.nojekyll
           du -sh _site
 
