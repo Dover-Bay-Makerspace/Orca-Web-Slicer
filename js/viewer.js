@@ -3,6 +3,9 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/OrbitControls.js';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 
 const COLORS = {
   model: 0x4f9dde,
@@ -59,10 +62,27 @@ export class Viewer extends EventTarget {
     this.setBed(this.bed);
     this.resetCamera();
     this.resize();
+    // Draw only when something changed (camera moved, models or preview
+    // updated) instead of every frame: much lighter on school computers.
+    this.needsRender = true;
+    for (const name of ['applyTheme', 'resize', 'setBed', 'resetCamera', 'addObject', 'addModifier', 'updateModifier',
+      'removeModifier', 'applyPlateVisibility', 'removeObject', 'updateObject', 'refreshColors', 'select', 'setMode',
+      'setPreview', 'setPreviewMode', 'setFeatureHidden', 'showLayers', 'clearPreview', 'frame', 'frameModels']) {
+      const original = this[name].bind(this);
+      this[name] = (...args) => {
+        const result = original(...args);
+        this.needsRender = true;
+        return result;
+      };
+    }
+    this.controls.addEventListener('change', () => { this.needsRender = true; });
     const tick = () => {
       this.controls.update();
-      this.renderer.render(this.scene, this.camera);
-      this.frame = requestAnimationFrame(tick);
+      if (this.needsRender) {
+        this.needsRender = false;
+        this.renderer.render(this.scene, this.camera);
+      }
+      this.rafId = requestAnimationFrame(tick);
     };
     tick();
   }
@@ -85,6 +105,7 @@ export class Viewer extends EventTarget {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    if (this.previewLines) this.previewLines.material.resolution.set(w, h);
     if (!this.cameraTouched && this.bed) this.resetCamera();
   }
 
@@ -372,35 +393,83 @@ export class Viewer extends EventTarget {
     this.previewGroup.visible = mode === 'preview';
   }
 
-  setPreview(data) {
+  /**
+   * Show sliced G-code. Each extrusion is drawn as a ribbon at the real
+   * extrusion width (like the desktop preview), so walls, supports and the
+   * skirt read clearly; features can be hidden to look inside.
+   */
+  setPreview(data, lineWidth = 0.45) {
     this.clearPreview();
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
-    this.featureColors = new THREE.BufferAttribute(data.colors, 3, true);
-    this.toolColors = data.toolColors ? new THREE.BufferAttribute(data.toolColors, 3, true) : null;
-    geo.setAttribute('color', this.featureColors);
-    const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ vertexColors: true }));
+    this.previewData = data;
+    this.previewLineWidth = lineWidth;
+    this.hiddenFeatures = new Set();
+    this.previewMode = 'feature';
+    this.layerTo = data.layerEnds.length - 1;
+    this.#buildPreview();
+  }
+
+  #buildPreview() {
+    const d = this.previewData;
+    if (!d) return;
+    if (this.previewLines) {
+      this.previewGroup.remove(this.previewLines);
+      this.previewLines.geometry.dispose();
+      this.previewLines.material.dispose();
+      this.previewLines = null;
+    }
+    const segs = d.positions.length / 6;
+    const keep = this.hiddenFeatures.size ? (i) => !this.hiddenFeatures.has(d.featureOf[i]) : () => true;
+    let count = 0;
+    for (let i = 0; i < segs; i++) if (keep(i)) count++;
+    const pos = new Float32Array(count * 6);
+    const col = new Float32Array(count * 6);
+    const src = this.previewMode === 'filament' && d.toolColors ? d.toolColors : d.colors;
+    // Segments kept up to the end of each layer, for the layer slider.
+    this.layerCounts = new Uint32Array(d.layerEnds.length);
+    let layer = 0, j = 0;
+    for (let i = 0; i < segs; i++) {
+      while (layer < d.layerEnds.length && i * 2 >= d.layerEnds[layer]) { this.layerCounts[layer] = j; layer++; }
+      if (!keep(i)) continue;
+      // Alternate layers are shaded slightly so individual layers stay visible.
+      const shade = (layer % 2 ? 0.86 : 1) / 255;
+      for (let k = 0; k < 6; k++) {
+        pos[j * 6 + k] = d.positions[i * 6 + k];
+        col[j * 6 + k] = src[i * 6 + k] * shade;
+      }
+      j++;
+    }
+    for (; layer < d.layerEnds.length; layer++) this.layerCounts[layer] = j;
+    const geo = new LineSegmentsGeometry();
+    if (count) {
+      geo.setPositions(pos);
+      geo.setColors(col);
+    }
+    const mat = new LineMaterial({ vertexColors: true, worldUnits: true, linewidth: this.previewLineWidth });
+    mat.resolution.set(this.container.clientWidth || 1, this.container.clientHeight || 1);
+    const lines = new LineSegments2(geo, mat);
     lines.frustumCulled = false;
     this.previewLines = lines;
-    this.previewData = data;
     this.previewGroup.add(lines);
-    this.showLayers(0, data.layerEnds.length - 1);
+    this.showLayers(0, this.layerTo);
   }
 
   /** Colour the preview by feature type or by filament. */
   setPreviewMode(mode) {
-    if (!this.previewLines) return;
-    const attr = mode === 'filament' && this.toolColors ? this.toolColors : this.featureColors;
-    this.previewLines.geometry.setAttribute('color', attr);
+    if (!this.previewData || this.previewMode === mode) return;
+    this.previewMode = mode;
+    this.#buildPreview();
+  }
+
+  setFeatureHidden(index, hidden) {
+    if (!this.previewData) return;
+    if (hidden) this.hiddenFeatures.add(index); else this.hiddenFeatures.delete(index);
+    this.#buildPreview();
   }
 
   showLayers(from, to) {
-    if (!this.previewLines) return;
-    const ends = this.previewData.layerEnds;
-    if (!ends.length) return;
-    const start = from > 0 ? ends[from - 1] : 0;
-    const end = ends[Math.min(to, ends.length - 1)];
-    this.previewLines.geometry.setDrawRange(start, Math.max(0, end - start));
+    if (!this.previewLines || !this.layerCounts || !this.layerCounts.length) return;
+    this.layerTo = Math.min(to, this.layerCounts.length - 1);
+    this.previewLines.geometry.instanceCount = this.layerCounts[this.layerTo];
   }
 
   clearPreview() {
@@ -411,6 +480,33 @@ export class Viewer extends EventTarget {
     }
     this.previewLines = null;
     this.previewData = null;
+  }
+
+  /** Point the camera at a box ([minX, minY, minZ, maxX, maxY, maxZ]) so it fills the view. */
+  frame(b) {
+    if (!b) return;
+    const center = new THREE.Vector3((b[0] + b[3]) / 2, (b[1] + b[4]) / 2, (b[2] + b[5]) / 2);
+    const radius = Math.max(5, 0.5 * Math.hypot(b[3] - b[0], b[4] - b[1], b[5] - b[2]));
+    const vfov = THREE.MathUtils.degToRad(this.camera.fov);
+    const hfov = 2 * Math.atan(Math.tan(vfov / 2) * this.camera.aspect);
+    const dist = (radius / Math.sin(Math.min(vfov, hfov) / 2)) * 1.15;
+    const dir = new THREE.Vector3().subVectors(this.camera.position, this.controls.target).normalize();
+    if (!Number.isFinite(dir.x) || dir.lengthSq() < 0.5) dir.set(-0.12, -1, 0.85).normalize();
+    this.controls.target.copy(center);
+    this.camera.position.copy(center).addScaledVector(dir, dist);
+    this.camera.near = Math.max(0.1, dist / 500);
+    this.camera.far = Math.max(dist * 20, 5000);
+    this.camera.updateProjectionMatrix();
+    this.controls.update();
+    this.cameraTouched = true;
+  }
+
+  /** Frame the models on the active plate, or the whole bed when there are none. */
+  frameModels() {
+    const box = new THREE.Box3();
+    for (const [id, o] of this.objects) if (o.mesh.visible) box.union(this.worldBox(id));
+    if (box.isEmpty()) { this.resetCamera(); return; }
+    this.frame([box.min.x, box.min.y, box.min.z, box.max.x, box.max.y, box.max.z]);
   }
 
   snapshot() {

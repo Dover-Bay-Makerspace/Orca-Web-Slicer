@@ -48,11 +48,16 @@ function parse(text, palette) {
   const toolRgb = (palette || []).map((c) => (/^#[0-9a-f]{6}$/i.test(c || '') ? hexToRgb(c) : [150, 150, 150]));
   let tool = 0;
   const toolsSeen = new Set();
+  let feat = new Uint8Array(1 << 18);   // feature index per segment
+  let featIndex = 0;
+  let isCustom = false;
+  const box = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
   let n = 0; // floats written
   function grow() {
     const p2 = new Float32Array(pos.length * 2); p2.set(pos); pos = p2;
     const c2 = new Uint8Array(col.length * 2); c2.set(col); col = c2;
     if (tcol) { const t2 = new Uint8Array(tcol.length * 2); t2.set(tcol); tcol = t2; }
+    const f2 = new Uint8Array(pos.length / 6); f2.set(feat); feat = f2;
   }
   let rgb = hexToRgb(DEFAULT_COLOR);
   function seg(x1, y1, z1, x2, y2, z2) {
@@ -67,6 +72,14 @@ function parse(text, palette) {
       tcol[n + 3] = t[0]; tcol[n + 4] = t[1]; tcol[n + 5] = t[2];
     }
     toolsSeen.add(tool);
+    feat[n / 6] = featIndex;
+    if (!isCustom) {
+      // The print's own extent (start/end purge lines are left out), for framing the view.
+      if (x1 < box[0]) box[0] = x1; if (y1 < box[1]) box[1] = y1; if (z1 < box[2]) box[2] = z1;
+      if (x2 > box[3]) box[3] = x2; if (y2 > box[4]) box[4] = y2; if (z2 > box[5]) box[5] = z2;
+      if (x2 < box[0]) box[0] = x2; if (y2 < box[1]) box[1] = y2;
+      if (x1 > box[3]) box[3] = x1; if (y1 > box[4]) box[4] = y1;
+    }
     n += 6;
   }
 
@@ -92,17 +105,18 @@ function parse(text, palette) {
     let line = lines[li];
     if (line.length === 0) continue;
     if (line.charCodeAt(0) === 59 /* ; */) {
-      if (line.startsWith(';LAYER_CHANGE')) {
+      if (line.startsWith(';LAYER_CHANGE') || line.startsWith('; CHANGE_LAYER')) {
         explicitLayers = true;
         closeLayer();
         pendingLayer = true;
-      } else if (line.startsWith(';Z:')) {
-        const v = parseFloat(line.slice(3));
+      } else if (line.startsWith(';Z:') || line.startsWith('; Z_HEIGHT:')) {
+        const v = parseFloat(line.slice(line.indexOf(':') + 1));
         if (Number.isFinite(v)) currentLayerZ = v;
-      } else if (line.startsWith(';TYPE:')) {
-        rgb = features[feature(line.slice(6).trim())].rgb;
-      } else if (line.startsWith('; FEATURE:')) {
-        rgb = features[feature(line.slice(10).trim())].rgb;
+      } else if (line.startsWith(';TYPE:') || line.startsWith('; FEATURE:')) {
+        const name = line.slice(line.indexOf(':') + 1).trim();
+        featIndex = feature(name);
+        rgb = features[featIndex].rgb;
+        isCustom = /^custom$/i.test(name);
       }
       continue;
     }
@@ -201,6 +215,8 @@ function parse(text, palette) {
     positions: pos.slice(0, n),
     colors: col.slice(0, n),
     toolColors: tcol ? tcol.slice(0, n) : null,
+    featureOf: feat.slice(0, n / 6),
+    bounds: Number.isFinite(box[0]) ? box : null,
     tools: [...toolsSeen].sort((a, b) => a - b),
     layerEnds: Uint32Array.from(layerEnds),
     layerZ: Float32Array.from(layerZ),
@@ -212,7 +228,7 @@ self.onmessage = (event) => {
   const { id, text, palette } = event.data;
   try {
     const r = parse(text, palette);
-    const transfer = [r.positions.buffer, r.colors.buffer, r.layerEnds.buffer, r.layerZ.buffer];
+    const transfer = [r.positions.buffer, r.colors.buffer, r.layerEnds.buffer, r.layerZ.buffer, r.featureOf.buffer];
     if (r.toolColors) transfer.push(r.toolColors.buffer);
     self.postMessage({ id, ok: true, ...r }, transfer);
   } catch (error) {

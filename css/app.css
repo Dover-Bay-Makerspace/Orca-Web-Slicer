@@ -423,3 +423,10 @@ button.secondary:hover:not(:disabled) { background: color-mix(in srgb, var(--acc
 .legend-mode button { padding: 2px 8px; font-size: 11px; }
 .legend-mode button.active { border-color: var(--accent); font-weight: 700; }
 .adv-slot { font-size: 13px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; } .adv-slot select { padding: 5px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); max-width: 220px; }
+
+/* ---------- preview legend ---------- */
+.legend-item { display: flex; align-items: center; gap: 6px; border: 0; background: none; padding: 1px 2px; font-size: 12px; text-align: left; width: 100%; }
+.legend-item:hover { text-decoration: underline; }
+.legend-item.off { opacity: .45; text-decoration: line-through; }
+.legend-hint { color: var(--muted); font-size: 11px; margin-top: 2px; }
+.fit-btn { order: 3; }

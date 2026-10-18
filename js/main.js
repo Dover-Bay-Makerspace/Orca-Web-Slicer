@@ -32,7 +32,7 @@ const ui = Object.fromEntries([
   'rTime', 'rFilament', 'downloadBtn', 'downloadAllBtn', 'rNote', 'message', 'tabPrepare', 'tabPreview', 'prepareTools',
   'addBtn', 'modelFile', 'arrangeBtn', 'orientBtn', 'rotX', 'rotY', 'rotZ', 'scaleInput', 'dupBtn', 'delBtn', 'viewport',
   'dropHint', 'layerControls', 'layerSlider', 'layerLabel', 'legend', 'objectBar', 'objectList', 'selectionInfo',
-  'plateBar', 'plateList', 'addPlateBtn', 'delPlateBtn', 'objPanel', 'objName', 'objPlate', 'addEnforcer', 'addBlocker',
+  'fitBtn', 'plateBar', 'plateList', 'addPlateBtn', 'delPlateBtn', 'objPanel', 'objName', 'objPlate', 'addEnforcer', 'addBlocker',
   'modList', 'modEdit', 'modTitle', 'modX', 'modY', 'modZ', 'modW', 'modD', 'modH', 'modDelete',
 ].map((id) => [id, $(id)]));
 
@@ -1507,7 +1507,11 @@ async function showPreview(plateId) {
   if (!r) return;
   if (state.previewPlate !== plateId || !viewer.previewData) {
     const preview = await parseGcodeForPreview(new TextDecoder().decode(r.gcode), r.colours);
-    viewer.setPreview(preview);
+    const lw = String(first(effective('line_width')) ?? '');
+    const nozzle = parseFloat(first(effectiveMachine().nozzle_diameter)) || 0.4;
+    const width = /%$/.test(lw) ? (parseFloat(lw) / 100) * nozzle : parseFloat(lw) || nozzle * 1.1;
+    viewer.setPreview(preview, Math.min(Math.max(width, 0.1), 2));
+    if (state.previewPlate !== plateId) viewer.frame(preview.bounds);
     state.previewPlate = plateId;
     state.previewResult = r;
     setupLayerSlider(preview);
@@ -1615,12 +1619,30 @@ function renderLegend() {
   const rows = previewMode === 'filament'
     ? d.tools.map((t) => ({ name: `${t + 1} · ${(r.names || [])[t] || 'Filament ' + (t + 1)}`, color: (r.colours || [])[t] || '#999' }))
     : d.features;
-  for (const f of rows) {
+  rows.forEach((f, index) => {
     const li = document.createElement('li');
     const sw = document.createElement('i');
     sw.style.background = f.color;
-    li.append(sw, document.createTextNode(f.name));
+    if (previewMode === 'feature') {
+      // Click a feature to hide/show it (e.g. hide the walls to see supports inside).
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'legend-item' + (viewer.hiddenFeatures?.has(index) ? ' off' : '');
+      b.title = viewer.hiddenFeatures?.has(index) ? `Show ${f.name}` : `Hide ${f.name}`;
+      b.setAttribute('aria-pressed', String(!viewer.hiddenFeatures?.has(index)));
+      b.append(sw, document.createTextNode(f.name));
+      b.onclick = () => { viewer.setFeatureHidden(index, !viewer.hiddenFeatures.has(index)); renderLegend(); };
+      li.append(b);
+    } else {
+      li.append(sw, document.createTextNode(f.name));
+    }
     items.push(li);
+  });
+  if (previewMode === 'feature') {
+    const hint = document.createElement('li');
+    hint.className = 'legend-hint';
+    hint.textContent = 'Click a type to hide or show it';
+    items.push(hint);
   }
   ui.legend.replaceChildren(...items);
 }
@@ -1878,6 +1900,10 @@ ui.tabPreview.onclick = async () => {
   setTab('preview');
 };
 ui.layerSlider.oninput = updateLayerLabel;
+ui.fitBtn.onclick = () => {
+  if (viewer.mode === 'preview' && viewer.previewData?.bounds) viewer.frame(viewer.previewData.bounds);
+  else viewer.frameModels();
+};
 ui.aboutBtn.onclick = () => ui.aboutDialog.showModal();
 
 ui.addPlateBtn.onclick = () => { const p = addPlate(); setActivePlate(p.id); };
