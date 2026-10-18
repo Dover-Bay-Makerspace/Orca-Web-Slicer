@@ -266,8 +266,13 @@ export class Viewer extends EventTarget {
 
   refreshColors() {
     for (const [id, o] of this.objects) {
-      const color = !this.isInside(id) ? COLORS.outside : id === this.selectedId ? COLORS.selected : COLORS.model;
-      o.mesh.material.color.setHex(color);
+      const inside = this.isInside(id);
+      const own = this.colourOf ? this.colourOf(o.item) : null;
+      if (!inside) o.mesh.material.color.setHex(COLORS.outside);
+      else if (own) o.mesh.material.color.set(own);
+      else o.mesh.material.color.setHex(id === this.selectedId ? COLORS.selected : COLORS.model);
+      // The selected model glows orange so it stands out whatever its filament colour.
+      o.mesh.material.emissive.setHex(id === this.selectedId ? 0x7a3c00 : 0x000000);
       for (const [mid, m] of o.modifiers) {
         const on = mid === this.selectedModifierId;
         m.material.opacity = on ? 0.6 : 0.32;
@@ -364,13 +369,22 @@ export class Viewer extends EventTarget {
     this.clearPreview();
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(data.colors, 3, true));
+    this.featureColors = new THREE.BufferAttribute(data.colors, 3, true);
+    this.toolColors = data.toolColors ? new THREE.BufferAttribute(data.toolColors, 3, true) : null;
+    geo.setAttribute('color', this.featureColors);
     const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ vertexColors: true }));
     lines.frustumCulled = false;
     this.previewLines = lines;
     this.previewData = data;
     this.previewGroup.add(lines);
     this.showLayers(0, data.layerEnds.length - 1);
+  }
+
+  /** Colour the preview by feature type or by filament. */
+  setPreviewMode(mode) {
+    if (!this.previewLines) return;
+    const attr = mode === 'filament' && this.toolColors ? this.toolColors : this.featureColors;
+    this.previewLines.geometry.setAttribute('color', attr);
   }
 
   showLayers(from, to) {

@@ -400,3 +400,26 @@ button.secondary:hover:not(:disabled) { background: color-mix(in srgb, var(--acc
   .topbar-right { flex-wrap: wrap; justify-content: flex-end; }
   .obj-panel { width: 220px; }
 }
+
+/* ---------- filaments ---------- */
+.slot-list { display: flex; flex-direction: column; gap: 6px; }
+.slot { display: flex; align-items: center; gap: 6px; }
+.slot select { flex: 1; min-width: 0; }
+.slot .slot-nozzle { flex: none; width: 78px; }
+.slot-num { width: 14px; text-align: center; font-size: 12px; font-weight: 700; color: var(--muted); flex: none; }
+.swatch { width: 28px; height: 28px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: none; cursor: pointer; flex: none; }
+.swatch::-webkit-color-swatch-wrapper { padding: 2px; }
+.swatch::-webkit-color-swatch { border: 0; border-radius: 4px; }
+.swatch::-moz-color-swatch { border: 0; border-radius: 4px; }
+.slot-del { font-size: 18px; padding: 0 4px; color: var(--muted); flex: none; }
+.add-slot { margin-top: 8px; }
+.obj-swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--border); flex: none; }
+.objectbar .dot, .breakdown i, .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; border: 1px solid rgba(0, 0, 0, .25); }
+.objectbar .dot { margin-right: 5px; vertical-align: -1px; }
+.breakdown { list-style: none; margin: -4px 0 10px; padding: 0; font-size: 12px; display: grid; gap: 2px; }
+.breakdown li { display: flex; align-items: center; gap: 6px; }
+.result .primary + .primary { margin-top: 6px; }
+.legend-mode { display: flex !important; gap: 2px; margin-bottom: 4px; }
+.legend-mode button { padding: 2px 8px; font-size: 11px; }
+.legend-mode button.active { border-color: var(--accent); font-weight: 700; }
+.adv-slot { font-size: 13px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; } .adv-slot select { padding: 5px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); max-width: 220px; }

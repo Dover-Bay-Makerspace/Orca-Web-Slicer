@@ -18,6 +18,15 @@ themselves (SD card, USB stick, or the printer's own web page).
   OrcaSlicer's **Arrange** and **Auto-orient**.
 - **Multiple plates:** add plates, move models between them, slice one plate
   or all of them, and download each plate's G-code or all of them as a .zip.
+- **Multiple filaments:** list several filaments, each with a material and
+  colour, and pick a filament for each model. On Bambu printers with an AMS
+  you can use up to 16, on the Snapmaker U1 one per tool head (4), and on the
+  Bambu H2D you choose the nozzle for each. OrcaSlicer's colour-based purge
+  amounts and a prime tower are set up automatically. The preview can colour
+  by filament, and the result shows grams per filament.
+- **Bambu printers:** besides plain G-code, **Download for Bambu
+  (.gcode.3mf)** gives the sliced-project file Bambu printers print from an
+  SD card.
 - **Support enforcers and blockers:** select a model and add boxes that force
   supports, or keep them out, in that area. Set each box's position and size
   in millimetres.
@@ -120,9 +129,12 @@ Hover over the pill to see the full error message.
 - **What stays on student PCs:** only normal browser data. That is the cached
   engine (about 30 MB, so later visits load fast), the student's last-used
   printer and settings, and any G-code files they download.
-- **Limits:** one filament per print. Multi-material, painted supports or
-  seams, and per-model setting modifiers aren't available; when a desktop
-  project contains them, they are skipped and the page says so. Adding a .3mf
+- **Limits:** each model prints in one filament; colour painting with the
+  brush, painted supports or seams, and per-model setting modifiers aren't
+  available. In desktop projects, coloured parts that stand on the bed become
+  separate models with their own filament; coloured parts set into a model
+  above the bed (such as eyes) use the model's main filament, and the page
+  says so. Adding a .3mf
   with **Add model** brings in just its models. Use **Open project…** to also
   load its plates and settings.
 - **Settings:** changes in Advanced settings are remembered in that browser.

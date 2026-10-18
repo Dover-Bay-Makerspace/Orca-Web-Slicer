@@ -257,6 +257,116 @@ try {
     await page.screenshot({ path: path.join(OUT, '06-sample-project.png') });
   }
 
+  // ---- multi-filament (fresh browser profile)
+  {
+    const mctx = await browser.newContext({ viewport: { width: 1400, height: 860 }, acceptDownloads: true });
+    const mp = await mctx.newPage();
+    mp.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
+    mp.on('dialog', (d) => d.accept());
+    await mp.goto(`http://localhost:${port}/`);
+    await mp.waitForFunction(() => document.getElementById('engineStatus').textContent.includes('ready'), null, { timeout: 20000 });
+    await mp.waitForFunction(() => document.getElementById('printerSelect').options.length > 0);
+    await mp.selectOption('#vendorSelect', 'BBL');
+    await mp.waitForTimeout(500);
+    await mp.selectOption('#printerSelect', 'Bambu Lab X1 Carbon 0.4 nozzle');
+    await mp.waitForTimeout(500);
+    await mp.click('#addSlotBtn');
+    await mp.waitForSelector('#filamentSelect2');
+    check('AMS printer: second filament added', (await mp.$$('.slot')).length === 2);
+    const opts = await mp.$$eval('#filamentSelect2 option', (o) => o.map((x) => x.value));
+    const petg = opts.find((v) => /PETG/.test(v)) || opts[3];
+    await mp.selectOption('#filamentSelect2', petg);
+    await mp.waitForTimeout(400);
+    await mp.$eval('.slot:nth-child(2) .swatch', (i) => { i.value = '#2255ee'; i.dispatchEvent(new Event('change')); });
+    await mp.setInputFiles('#modelFile', [path.join(models, 'tall-box.stl'), path.join(models, 'pyramid.stl')]);
+    await mp.waitForFunction(() => document.querySelectorAll('#objectList li').length === 2, null, { timeout: 10000 });
+    await mp.click('#objectList li:nth-child(2) button');
+    check('model panel offers a filament choice', await mp.isVisible('#objFilament'));
+    await mp.selectOption('#objFilament', '2');
+    const dots = await mp.$$eval('#objectList .dot', (d) => d.map((x) => getComputedStyle(x).backgroundColor));
+    check('models show their filament colours', dots.length === 2 && dots[0] !== dots[1], dots.join(' / '));
+    await mp.click('#advBtn');
+    await mp.click('.adv-tabs .tab[data-tab="filament"]');
+    check('editor lets you pick which filament to edit', await mp.isVisible('.adv-slot select'));
+    await mp.selectOption('.adv-slot select', '1');
+    await mp.waitForSelector('#adv-nozzle_temperature');
+    await mp.fill('#adv-nozzle_temperature', '247');
+    await mp.dispatchEvent('#adv-nozzle_temperature', 'change');
+    await mp.keyboard.press('Escape');
+    await mp.click('#sliceBtn');
+    await mp.waitForSelector('#result:not([hidden])', { timeout: 20000 });
+    await mp.waitForTimeout(300);
+    await mp.screenshot({ path: path.join(OUT, '09-multi-filament.png') });
+    check('per-filament weights shown', (await mp.$$('#rBreakdown li')).length === 2);
+    check('Bambu .gcode.3mf download offered', await mp.isVisible('#download3mfBtn'));
+    const [g] = await Promise.all([mp.waitForEvent('download'), mp.click('#downloadBtn')]);
+    const gp = path.join(OUT, 'multi.gcode');
+    await g.saveAs(gp);
+    const gt = fs.readFileSync(gp, 'utf8');
+    check('both tools used in the G-code', /^T0$/m.test(gt) && /^T1$/m.test(gt));
+    check('filament colours and AMS mapping sent', gt.includes('; filament_colour = ["') && gt.includes('#2255EE') && gt.includes('; filament_map = ["1","1"]'));
+    check('purge volumes for 2 filaments sent', gt.includes('; flush_volumes_matrix_len = 4'));
+    check('prime tower turned on for 2 filaments', gt.includes('; enable_prime_tower = 1'));
+    check('per-filament edit only changes that filament', /; nozzle_temperature = \["\d+","247"\]/.test(gt), gt.split('\n').find((l) => l.includes('nozzle_temperature')));
+    check('second filament keeps its own material', /; filament_type = \["PLA","PETG"\]/.test(gt), gt.split('\n').find((l) => l.includes('filament_type')));
+    const [g3] = await Promise.all([mp.waitForEvent('download'), mp.click('#download3mfBtn')]);
+    const g3p = path.join(OUT, 'bambu.gcode.3mf');
+    await g3.saveAs(g3p);
+    check('.gcode.3mf contains the plate G-code', g3.suggestedFilename().endsWith('.gcode.3mf') && 'Metadata/plate_1.gcode' in unzip(fs.readFileSync(g3p)));
+    check('preview can colour by filament', (await mp.$$('.legend-mode button')).length === 2);
+    await mp.click('.legend-mode button:nth-child(2)');
+    await mp.waitForTimeout(200);
+    await mp.screenshot({ path: path.join(OUT, '10-filament-preview.png') });
+    await mp.click('#tabPrepare');
+    await mp.click('.slot:nth-child(2) .slot-del');
+    await mp.waitForTimeout(300);
+    check('removing a filament moves its models to filament 1', (await mp.$$('.slot')).length === 1 && (await mp.$$('#objectList .dot')).length === 0);
+
+    await mp.selectOption('#printerSelect', 'Bambu Lab H2D 0.4 nozzle');
+    await mp.waitForTimeout(500);
+    await mp.click('#addSlotBtn');
+    await mp.waitForSelector('.slot-nozzle');
+    check('H2D: each filament picks a nozzle', (await mp.$$('.slot-nozzle')).length === 2
+      && (await mp.$$eval('.slot-nozzle', (s) => s.map((x) => x.value))).join() === '1,2');
+
+    await mp.selectOption('#vendorSelect', 'Snapmaker');
+    await mp.waitForTimeout(500);
+    await mp.selectOption('#printerSelect', 'Snapmaker U1 (0.4 nozzle)');
+    await mp.waitForTimeout(500);
+    while (await mp.isVisible('#addSlotBtn')) { await mp.click('#addSlotBtn'); await mp.waitForTimeout(150); }
+    check('Snapmaker U1: up to 4 filaments, one per tool head', (await mp.$$('.slot')).length === 4
+      && /4 tool heads/.test(await mp.$eval('#slotHint', (e) => e.textContent)));
+    await mp.click('#objectList li:nth-child(2) button');
+    await mp.selectOption('#objFilament', '4');
+    await mp.click('#sliceBtn');
+    await mp.waitForSelector('#result:not([hidden])', { timeout: 20000 });
+    const [u] = await Promise.all([mp.waitForEvent('download'), mp.click('#downloadBtn')]);
+    const up = path.join(OUT, 'u1.gcode');
+    await u.saveAs(up);
+    const ut = fs.readFileSync(up, 'utf8');
+    check('U1: filament 4 goes to tool head 4', ut.includes('; filament_map = ["1","2","3","4"]') && /^T3$/m.test(ut));
+    check('no Bambu package for other printers', !(await mp.isVisible('#download3mfBtn')));
+
+    if (SAMPLES && fs.existsSync(path.join(SAMPLES, 'OrcaSliced.3mf'))) {
+      await mp.selectOption('#vendorSelect', 'BBL');
+      await mp.waitForTimeout(500);
+      await mp.selectOption('#printerSelect', 'Bambu Lab P1S 0.4 nozzle');
+      await mp.waitForTimeout(500);
+      await mp.setInputFiles('#projectFile', path.join(SAMPLES, 'OrcaSliced.3mf'));
+      await mp.waitForFunction(() => /^Opened/.test(document.getElementById('message').textContent), null, { timeout: 30000 });
+      const om = await msg(mp);
+      check('Orca sample keeps its colours as separate filaments', (await mp.$$('.slot')).length >= 2
+        && (await mp.$$('#objectList li')).length === 5 && /coloured part/.test(om), om.replace(/\n/g, ' | ').slice(0, 200));
+      await mp.selectOption('#vendorSelect', 'Prusa');
+      await mp.waitForTimeout(500);
+      await mp.setInputFiles('#projectFile', path.join(SAMPLES, 'OrcaSliced.3mf'));
+      await mp.waitForFunction(() => /^Opened/.test(document.getElementById('message').textContent), null, { timeout: 30000 });
+      check('single-filament printer explains extra colours', /takes 1; models for the others use filament 1/.test(await msg(mp)));
+      await mp.screenshot({ path: path.join(OUT, '11-orca-sample-colours.png') });
+    }
+    await mctx.close();
+  }
+
   // ---- presets + persistence
   await page.setInputFiles('#presetFile', path.join(OUT, 'my-mk3s.json'));
   await page.waitForFunction(() => [...document.querySelectorAll('#printerSelect option')].some((o) => o.value === 'user:My MK3S (classroom)'), null, { timeout: 5000 });

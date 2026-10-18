@@ -82,8 +82,11 @@ var OneSlicerEngine = (function () {
     var boxes = insts.map(function (inst) {
       var obj = mf.objects.find(function (o) { return o.id === inst.objectId; });
       var mesh = mf.meshes.find(function (m) { return m.id === obj.meshId; });
-      return stlBoxes(blob, mesh, inst.transform.matrix);
-    });
+      var b = stlBoxes(blob, mesh, inst.transform.matrix);
+      b.tool = Math.max(1, obj.extruderId || 1) - 1;
+      return b;
+    }).sort(function (a, b) { return a.tool - b.tool; });
+    var mass = [];
     var mods = mf.modifierVolumes.filter(function (m) { return m.plateId === plateId; });
     var top = Math.max.apply(null, boxes.map(function (b) { return b.max[2] - Math.min(0, b.min[2]); }));
     var layers = Math.max(1, Math.round(top / lh));
@@ -98,13 +101,21 @@ var OneSlicerEngine = (function () {
       '; nozzle_temperature = ' + JSON.stringify(cfg.nozzle_temperature), '; printable_area = ' + JSON.stringify(cfg.printable_area),
       '; machine_start_gcode = ' + JSON.stringify(cfg.machine_start_gcode),
       '; applied_layers = ' + self.applied.length,
+      '; filament_colour = ' + JSON.stringify(cfg.filament_colour), '; filament_map = ' + JSON.stringify(cfg.filament_map),
+      '; filament_type = ' + JSON.stringify(cfg.filament_type),
+      '; flush_volumes_matrix_len = ' + (cfg.flush_volumes_matrix ? cfg.flush_volumes_matrix.length : 0),
+      '; enable_prime_tower = ' + cfg.enable_prime_tower, '; use_relative_e_distances = ' + cfg.use_relative_e_distances,
+      '; object_tools = ' + boxes.map(function (b) { return b.tool; }).join(','),
       'G90', 'M83', 'G28', 'G1 Z5 F3000'];
     var e = 0;
     for (var L = 0; L < layers; L++) {
       if (options && options.signal && options.signal.aborted) throw err('CANCELLED', 'cancelled');
       var z = ((L + 1) * lh).toFixed(3);
       out.push(';LAYER_CHANGE', ';Z:' + z, 'G1 Z' + z + ' F600');
+      var curTool = -1;
       boxes.forEach(function (b) {
+        if (b.tool !== curTool) { out.push('T' + b.tool); curTool = b.tool; }
+        mass[b.tool] = (mass[b.tool] || 0) + 0.09;
         var x0 = b.min[0], y0 = b.min[1], x1 = b.max[0], y1 = b.max[1];
         out.push(';TYPE:Outer wall', 'G0 X' + x0.toFixed(3) + ' Y' + y0.toFixed(3));
         out.push('G1 X' + x1.toFixed(3) + ' Y' + y0.toFixed(3) + ' E0.5', 'G1 X' + x1.toFixed(3) + ' Y' + y1.toFixed(3) + ' E0.5',
@@ -125,7 +136,8 @@ var OneSlicerEngine = (function () {
       plateId: plateId,
       assets: [{ id: 'gcode:' + plateId, kind: 'gcode', mimeType: 'text/x-gcode', byteLength: this.assets['gcode:' + plateId].length }],
       statistics: { schemaVersion: '0.7.0', timeSeconds: { normal: 1234 + layers * 10, silent: null, firstLayer: 30 },
-        filament: { totalLengthMm: e * 10, totalMassG: e * 0.03, totalVolumeCm3: e * 0.02, totalCost: 0 } },
+        filament: { totalLengthMm: e * 10, totalMassG: e * 0.03, totalVolumeCm3: e * 0.02, totalCost: 0,
+          massGByExtruder: Array.from({ length: mass.length }, function (_, i) { return mass[i] || 0; }) } },
     };
   };
 
@@ -168,6 +180,7 @@ var OneSlicerEngine = (function () {
       if (count > 1) { m[3] += (idx % cols) * W * 1.2; m[7] += -Math.floor(idx / cols) * D * 1.2; }
       build.push('<item objectid="' + cid + '" transform="' + tf(m) + '" printable="1"/>');
       settingsXml.push('<object id="' + cid + '"><metadata key="name" value="' + (obj.label || obj.id).replace(/"/g, '&quot;') + '"/>' +
+        '<metadata key="extruder" value="' + (obj.extruderId || 1) + '"/>' +
         parts.map(function (p) { return '<part id="' + p.id + '" subtype="' + p.sub + '"><metadata key="name" value="p"/></part>'; }).join('') + '</object>');
       (plateInst[idx] = plateInst[idx] || []).push(cid);
     });
@@ -179,13 +192,22 @@ var OneSlicerEngine = (function () {
       res.join('') + '</resources><build>' + build.join('') + '</build></model>';
     var settings = '<?xml version="1.0" encoding="UTF-8"?>\n<config>' + settingsXml.join('') + plates.join('') + '</config>';
     var cfgOut = {}; for (var k in cfg) cfgOut[k] = cfg[k];
-    var zip = storedZip([
+    var extra = [];
+    if (options && options.includeSliceArtifacts) {
+      var self2 = this;
+      mf.plates.forEach(function (p) {
+        var g = self2.assets['gcode:' + p.id];
+        if (!g) throw err('NO_DATA', 'plate ' + p.id + ' has no current G-code');
+        extra.push({ name: 'Metadata/plate_' + (p.index + 1) + '.gcode', data: new TextDecoder().decode(g) });
+      });
+    }
+    var zip = storedZip(extra.concat([
       { name: '[Content_Types].xml', data: '<?xml version="1.0"?><Types/>' },
       { name: '_rels/.rels', data: '<?xml version="1.0"?><Relationships><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>' },
       { name: '3D/3dmodel.model', data: model },
       { name: 'Metadata/model_settings.config', data: settings },
       { name: 'Metadata/project_settings.config', data: JSON.stringify(cfgOut, null, 2) },
-    ]);
+    ]));
     this.assets['project:export'] = zip;
     return { schemaVersion: '0.7.0', asset: { id: 'project:export', kind: 'project', mimeType: 'model/3mf', byteLength: zip.length } };
   };

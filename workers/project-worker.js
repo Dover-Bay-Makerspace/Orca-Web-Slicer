@@ -222,15 +222,18 @@ function parseModelSettings(text) {
   let m;
   while ((m = ore.exec(text))) {
     const body = m[2];
-    const name = (/<metadata\s+key="name"\s+value="([^"]*)"/.exec(body.split('<part')[0]) || [])[1];
+    const head = body.split('<part')[0];
+    const name = (/<metadata\s+key="name"\s+value="([^"]*)"/.exec(head) || [])[1];
+    const extruder = +((/<metadata\s+key="extruder"\s+value="([^"]*)"/.exec(head) || [])[1] || 0);
     const parts = new Map();
-    const pre = /<part\s+([^>]*)>/g;
+    const pre = /<part\s+([^>]*)>([\s\S]*?)<\/part>/g;
     let p;
     while ((p = pre.exec(body))) {
       const pa = attrs(p[1]);
-      parts.set(pa.id, pa.subtype || 'normal_part');
+      const pe = +((/<metadata\s+key="extruder"\s+value="([^"]*)"/.exec(p[2]) || [])[1] || 0);
+      parts.set(pa.id, { type: pa.subtype || 'normal_part', extruder: pe });
     }
-    objects.set(m[1], { name: name ? decodeEntities(name) : '', parts });
+    objects.set(m[1], { name: name ? decodeEntities(name) : '', extruder, parts });
   }
   const plre = /<plate>([\s\S]*?)<\/plate>/g;
   let pl;
@@ -305,14 +308,14 @@ async function readProject(buffer, fallbackBed) {
 
   // Resolve an object to { normal: [Float32Array], modifiers: [{role, positions}] } in its own frame.
   const skipped = { modifier_part: 0, negative_part: 0, other: 0 };
-  async function collect(path, id, matrix, partType, depth, out) {
+  async function collect(path, id, matrix, partType, depth, out, extruder = 0) {
     if (depth > 16) return;
     const file = await modelFile(path);
     const obj = file.objects.get(id);
     if (!obj) { warnings.push(`Object ${id} is missing from ${path}`); return; }
     if (obj.mesh && obj.mesh.length) {
       const pos = transformPositions(obj.mesh, matrix);
-      if (partType === 'normal_part' || !partType) out.normal.push(pos);
+      if (partType === 'normal_part' || !partType) out.normal.push({ positions: pos, extruder });
       else if (partType === 'support_enforcer' || partType === 'support_blocker') {
         out.modifiers.push({ role: partType === 'support_enforcer' ? 'support-enforcer' : 'support-blocker', positions: pos });
       } else if (partType === 'modifier_part') skipped.modifier_part++;
@@ -321,38 +324,67 @@ async function readProject(buffer, fallbackBed) {
     }
     for (const c of obj.components) {
       const childPath = c.path || path;
-      // Bambu/Orca: part types are listed per component object id in model_settings.config.
+      // Bambu/Orca: part types and filaments are listed per component object id in model_settings.config.
       let type = partType;
+      let ext = extruder;
       const ms = depth === 0 ? settings.objects.get(id) : null;
-      if (ms && ms.parts.has(c.objectid)) type = ms.parts.get(c.objectid);
-      await collect(childPath, c.objectid, mul(matrix, c.matrix), type, depth + 1, out);
+      if (ms && ms.parts.has(c.objectid)) {
+        const part = ms.parts.get(c.objectid);
+        type = part.type;
+        if (part.extruder) ext = part.extruder;
+      }
+      await collect(childPath, c.objectid, mul(matrix, c.matrix), type, depth + 1, out, ext);
     }
+  }
+
+  function minZ(pos, m) {
+    let mn = Infinity;
+    for (let i = 0; i < pos.length; i += 3) {
+      const z = m[2] * pos[i] + m[6] * pos[i + 1] + m[10] * pos[i + 2] + m[14];
+      if (z < mn) mn = z;
+    }
+    return mn;
   }
 
   const plateCount = settings.plates.length;
   const bed = printableBounds(config) || fallbackBed;
   const instanceSeen = new Map();
-  const objects = new Map();
+  const groups = new Map();   // build object -> [output objects] (one per filament when parts differ)
+  let floatingParts = 0;
   for (const item of root.items) {
     const path = item.path || rootPath;
     const key = path + '#' + item.objectid;
-    if (!objects.has(key)) {
+    if (!groups.has(key)) {
       const file = await modelFile(path);
       const src = file.objects.get(item.objectid);
       if (!src) { warnings.push('A build item refers to a missing object.'); continue; }
-      const out = { normal: [], modifiers: [] };
-      await collect(path, item.objectid, IDENTITY, 'normal_part', 0, out);
-      if (!out.normal.length) { warnings.push(`"${src.name || 'Object ' + item.objectid}" has no printable parts and was skipped.`); continue; }
       const ms = settings.objects.get(item.objectid);
-      objects.set(key, {
+      const objExtruder = (ms && ms.extruder) || 1;
+      const out = { normal: [], modifiers: [] };
+      await collect(path, item.objectid, IDENTITY, 'normal_part', 0, out, objExtruder);
+      if (!out.normal.length) { warnings.push(`"${src.name || 'Object ' + item.objectid}" has no printable parts and was skipped.`); continue; }
+      const name = (ms && ms.name) || src.name || 'Object ' + item.objectid;
+      // The web engine gives each object one filament. Parts in another filament
+      // become their own objects when they stand on the bed like the model does;
+      // parts that float (e.g. eyes set into a head) stay with the main body.
+      const bottom = Math.min(...out.normal.map((p) => minZ(p.positions, item.matrix)));
+      const byFilament = new Map();
+      for (const part of out.normal) {
+        let ext = part.extruder || objExtruder;
+        if (ext !== objExtruder && minZ(part.positions, item.matrix) - bottom > 0.05) { ext = objExtruder; floatingParts++; }
+        if (!byFilament.has(ext)) byFilament.set(ext, []);
+        byFilament.get(ext).push(part.positions);
+      }
+      const list = [...byFilament.entries()].map(([ext, parts], i) => ({
         sourceId: item.objectid,
-        name: (ms && ms.name) || src.name || 'Object ' + item.objectid,
-        positions: concat(out.normal),
-        modifiers: out.modifiers,
+        name: byFilament.size > 1 ? `${name} (${i + 1})` : name,
+        filament: ext,
+        positions: concat(parts),
+        modifiers: ext === objExtruder ? out.modifiers : [],
         instances: [],
-      });
+      }));
+      groups.set(key, list);
     }
-    const obj = objects.get(key);
     const instanceId = instanceSeen.get(key) || 0;
     instanceSeen.set(key, instanceId + 1);
     let plateIndex = 0;
@@ -364,9 +396,12 @@ async function readProject(buffer, fallbackBed) {
     const [ox, oy] = plateOrigin(plateCount, plateIndex, bed);
     matrix[12] -= ox;
     matrix[13] -= oy;
-    obj.instances.push({ matrix, plateIndex });
+    for (const obj of groups.get(key) || []) obj.instances.push({ matrix, plateIndex });
   }
+  const objects = new Map();
+  for (const [key, list] of groups) list.forEach((o, i) => objects.set(key + '#' + i, o));
   if (!objects.size) throw new Error('No printable objects were found in this 3MF file.');
+  if (floatingParts) warnings.push(`${floatingParts} coloured part(s) that sit above the bed (such as inlaid details) use their model's main filament; the web engine gives each model one filament.`);
   if (skipped.modifier_part) warnings.push(`${skipped.modifier_part} setting-modifier part(s) were ignored (not supported here).`);
   if (skipped.negative_part) warnings.push(`${skipped.negative_part} negative part(s) were ignored (not supported here).`);
 

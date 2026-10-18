@@ -29,7 +29,7 @@ function hexToRgb(hex) {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-function parse(text) {
+function parse(text, palette) {
   const featureIndex = new Map();
   const features = [];
   function feature(name) {
@@ -44,10 +44,15 @@ function parse(text) {
 
   let pos = new Float32Array(1 << 20);
   let col = new Uint8Array(1 << 20);
+  let tcol = palette ? new Uint8Array(1 << 20) : null;
+  const toolRgb = (palette || []).map((c) => (/^#[0-9a-f]{6}$/i.test(c || '') ? hexToRgb(c) : [150, 150, 150]));
+  let tool = 0;
+  const toolsSeen = new Set();
   let n = 0; // floats written
   function grow() {
     const p2 = new Float32Array(pos.length * 2); p2.set(pos); pos = p2;
     const c2 = new Uint8Array(col.length * 2); c2.set(col); col = c2;
+    if (tcol) { const t2 = new Uint8Array(tcol.length * 2); t2.set(tcol); tcol = t2; }
   }
   let rgb = hexToRgb(DEFAULT_COLOR);
   function seg(x1, y1, z1, x2, y2, z2) {
@@ -56,6 +61,12 @@ function parse(text) {
     pos[n + 3] = x2; pos[n + 4] = y2; pos[n + 5] = z2;
     col[n] = rgb[0]; col[n + 1] = rgb[1]; col[n + 2] = rgb[2];
     col[n + 3] = rgb[0]; col[n + 4] = rgb[1]; col[n + 5] = rgb[2];
+    if (tcol) {
+      const t = toolRgb[tool] || [150, 150, 150];
+      tcol[n] = t[0]; tcol[n + 1] = t[1]; tcol[n + 2] = t[2];
+      tcol[n + 3] = t[0]; tcol[n + 4] = t[1]; tcol[n + 5] = t[2];
+    }
+    toolsSeen.add(tool);
     n += 6;
   }
 
@@ -101,6 +112,11 @@ function parse(text) {
     if (!line) continue;
     const parts = line.split(/\s+/);
     const cmd = parts[0].toUpperCase();
+    if (/^T\d+$/.test(cmd)) {
+      const t = +cmd.slice(1);
+      if (t < 64) tool = t; // T255 / T1000 are Bambu unload commands, not tools
+      continue;
+    }
     if (cmd === 'G90') { absXYZ = true; absE = true; continue; }
     if (cmd === 'G91') { absXYZ = false; absE = false; continue; }
     if (cmd === 'M82') { absE = true; continue; }
@@ -184,6 +200,8 @@ function parse(text) {
   return {
     positions: pos.slice(0, n),
     colors: col.slice(0, n),
+    toolColors: tcol ? tcol.slice(0, n) : null,
+    tools: [...toolsSeen].sort((a, b) => a - b),
     layerEnds: Uint32Array.from(layerEnds),
     layerZ: Float32Array.from(layerZ),
     features: features.map(({ name, color }) => ({ name, color })),
@@ -191,10 +209,12 @@ function parse(text) {
 }
 
 self.onmessage = (event) => {
-  const { id, text } = event.data;
+  const { id, text, palette } = event.data;
   try {
-    const r = parse(text);
-    self.postMessage({ id, ok: true, ...r }, [r.positions.buffer, r.colors.buffer, r.layerEnds.buffer, r.layerZ.buffer]);
+    const r = parse(text, palette);
+    const transfer = [r.positions.buffer, r.colors.buffer, r.layerEnds.buffer, r.layerZ.buffer];
+    if (r.toolColors) transfer.push(r.toolColors.buffer);
+    self.postMessage({ id, ok: true, ...r }, transfer);
   } catch (error) {
     self.postMessage({ id, ok: false, error: String(error && error.message || error) });
   }

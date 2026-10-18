@@ -44,6 +44,8 @@ export class SettingsEditor {
     this.page = {};
     this.query = '';
     this.showExpert = false;
+    this.slot = 0;
+    this.keyTab = keyTabs(schema);
     this.#build();
   }
 
@@ -68,7 +70,12 @@ export class SettingsEditor {
     this.expertBox.type = 'checkbox';
     this.expertBox.onchange = () => { this.showExpert = this.expertBox.checked; this.render(); };
     expertLabel.append(this.expertBox, document.createTextNode(' Show expert settings'));
-    tools.append(this.search, expertLabel);
+    // Which filament the Filament settings edit, when there are several.
+    this.slotLabel = el('label', 'adv-slot');
+    this.slotSelect = el('select');
+    this.slotSelect.onchange = () => { this.slot = +this.slotSelect.value; this.render(); };
+    this.slotLabel.append(document.createTextNode('Filament '), this.slotSelect);
+    tools.append(this.search, this.slotLabel, expertLabel);
 
     this.tabsEl = el('div', 'tabs adv-tabs');
     for (const t of Object.keys(TAB_LABELS)) {
@@ -151,6 +158,11 @@ export class SettingsEditor {
   render() {
     if (this.root.hidden) return;
     for (const b of this.tabsEl.children) b.classList.toggle('active', b.dataset.tab === this.tab && !this.query);
+    const slots = this.model.slots ? this.model.slots() : [];
+    this.slot = Math.min(this.slot, Math.max(0, slots.length - 1));
+    this.slotLabel.hidden = slots.length < 2 || (this.tab !== 'filament' && !this.query);
+    this.slotSelect.replaceChildren(...slots.map((label, i) => new Option(label, String(i))));
+    this.slotSelect.value = String(this.slot);
     this.content.innerHTML = '';
     this.#renderCounts();
     if (this.query) {
@@ -221,8 +233,10 @@ export class SettingsEditor {
     const base = this.model.base(key);
     const override = this.model.override(key);
     const raw = override !== undefined ? override : (base !== undefined ? base : def.default);
-    const shown = first(raw);
-    const changed = override !== undefined;
+    // Filament settings hold one value per filament; edit the chosen one.
+    const idx = this.keyTab.get(key) === 'filament' && Array.isArray(raw) ? Math.min(this.slot, raw.length - 1) : 0;
+    const shown = Array.isArray(raw) ? raw[idx] : raw;
+    const changed = override !== undefined && (!Array.isArray(override) || !same(override[idx], Array.isArray(base) ? base[idx] : base));
 
     const row = el('div', 'adv-row' + (changed ? ' changed' : ''));
     const label = el('label', 'adv-label', this.label(entry));
@@ -232,10 +246,13 @@ export class SettingsEditor {
     const field = el('div', 'adv-field');
 
     const commit = (value) => {
-      let next = Array.isArray(raw) ? [value, ...raw.slice(1)] : value;
-      if (Array.isArray(raw) && raw.length === 0) next = [value];
-      const isChanged = !same(next, base);
-      this.model.set(key, isChanged ? next : undefined);
+      let next = value;
+      if (Array.isArray(raw)) {
+        next = raw.length ? raw.slice() : [value];
+        next[idx] = value;
+      }
+      this.model.set(key, same(next, base) ? undefined : next);
+      const isChanged = Array.isArray(next) && Array.isArray(base) ? !same(next[idx], base[idx]) : !same(next, base);
       this.model.onChange();
       row.classList.toggle('changed', isChanged);
       reset.hidden = !isChanged;
@@ -292,10 +309,18 @@ export class SettingsEditor {
     }
     const reset = el('button', 'link reset', '↺');
     reset.type = 'button';
-    reset.title = 'Back to the profile value' + (base !== undefined ? `: ${first(base)}` : '');
+    const baseShown = Array.isArray(base) ? base[idx] : base;
+    reset.title = 'Back to the profile value' + (baseShown !== undefined ? `: ${baseShown}` : '');
     reset.hidden = !changed;
     reset.onclick = () => {
-      this.model.set(key, undefined);
+      const cur = this.model.override(key);
+      if (Array.isArray(cur) && Array.isArray(base) && cur.length === base.length) {
+        const next = cur.slice();
+        next[idx] = base[idx];
+        this.model.set(key, same(next, base) ? undefined : next);
+      } else {
+        this.model.set(key, undefined);
+      }
       this.model.onChange();
       row.replaceWith(this.#row(entry));
       this.#renderCounts();

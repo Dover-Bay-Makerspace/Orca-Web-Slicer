@@ -59,9 +59,9 @@ export class EngineClient {
   }
 
   /** Slice one or more plates. Returns { promise, cancel }. */
-  slice(layers, blob, manifest, plateIds, onProgress) {
+  slice(layers, blob, manifest, plateIds, onProgress, packaged = false) {
     const copy = blob.slice().buffer;
-    const promise = this.#call('slice', { layers, blob: copy, manifest, plateIds }, [copy], onProgress);
+    const promise = this.#call('slice', { layers, blob: copy, manifest, plateIds, packaged }, [copy], onProgress);
     const id = promise.requestId;
     return {
       promise,

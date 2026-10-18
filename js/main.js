@@ -3,11 +3,12 @@ import { EngineClient } from './engine-client.js';
 import { parseStl, normalise, bounds, toBinaryStl, fileKind, ACCEPTED_EXTENSIONS } from './meshes.js';
 import {
   loadIndex, loadLibrary, loadVendor, loadNames, resolveFile, resolveUserPreset, normaliseType,
-  first, bedFromMachine, extruderCount, filamentForSlots, BED_TYPES,
+  first, bedFromMachine, extruderCount, BED_TYPES,
 } from './profiles.js';
 import { SettingsEditor, keyTabs } from './settings-editor.js';
 import { readProjectFile } from './project-io.js';
 import { makeZip } from './zip.js';
+import { flushVolume } from './flush.js';
 
 const API_VERSION = '0.7.0';
 const STORE_KEY = 'orcaweb.settings.v2';
@@ -24,7 +25,8 @@ const METADATA_KEYS = new Set([
 const $ = (id) => document.getElementById(id);
 const ui = Object.fromEntries([
   'engineStatus', 'aboutBtn', 'aboutDialog', 'aboutVersions', 'sourceLink', 'newBtn', 'openBtn', 'saveBtn', 'projectFile',
-  'vendorSelect', 'printerSelect', 'bedTypeSelect', 'bedInfo', 'filamentSelect', 'processSelect',
+  'vendorSelect', 'printerSelect', 'bedTypeSelect', 'bedInfo', 'slotList', 'addSlotBtn', 'slotHint', 'processSelect',
+  'objFilament', 'objSwatch', 'rBreakdown', 'download3mfBtn',
   'qLayer', 'qInfill', 'qWalls', 'qSupport', 'qBrim', 'resetQuick', 'importPreset', 'presetFile', 'advBtn', 'advCount',
   'advPanel', 'sliceBtn', 'sliceAllBtn', 'progress', 'progressFill', 'progressText', 'cancelBtn', 'result', 'rPlate',
   'rTime', 'rFilament', 'downloadBtn', 'downloadAllBtn', 'rNote', 'message', 'tabPrepare', 'tabPreview', 'prepareTools',
@@ -45,9 +47,10 @@ const state = {
   printer: null,         // printer entry from vendor index
   machine: null,         // resolved machine preset
   process: null,         // resolved process preset
-  filament: null,        // resolved filament preset
+  slots: [],             // filaments: [{ id, value, name, settings, colour, nozzle }]
+  nextSlot: 1,
+  filamentCombined: {},  // per-filament settings as arrays (one value per filament)
   processName: '',
-  filamentName: '',
   userPresets: { machine: [], process: [], filament: [] },
   overrides: {},         // setting key -> value, applied on top of the presets
   schema: null,
@@ -74,7 +77,7 @@ function save() {
     printer: ui.printerSelect.value,
     bedType: ui.bedTypeSelect.value,
     process: ui.processSelect.value,
-    filament: ui.filamentSelect.value,
+    slots: state.slots.map((x) => ({ value: x.value, colour: x.colour, nozzle: x.nozzle })),
     overrides: state.overrides,
     userPresets: state.userPresets,
   };
@@ -170,9 +173,7 @@ function setEngineStatus(kind, text, title = '') {
 
 /** Preset value of a setting (before the user's changes). */
 function baseValue(key) {
-  if (state.filament && key in state.filament) {
-    return filamentForSlots({ [key]: state.filament[key] }, extruderCount(state.machine || {}))[key];
-  }
+  if (key in state.filamentCombined) return state.filamentCombined[key];
   if (state.process && key in state.process) return state.process[key];
   if (state.machine && key in state.machine) return state.machine[key];
   return undefined;
@@ -190,7 +191,7 @@ function setOverride(key, value) {
 /** Drop the user's changes that belong to one settings tab (when its preset changes). */
 function clearOverrides(tab) {
   for (const key of Object.keys(state.overrides)) {
-    const t = state.keyTab.get(key) || (key in (state.filament || {}) ? 'filament' : key in (state.machine || {}) ? 'machine' : 'process');
+    const t = state.keyTab.get(key) || (key in state.filamentCombined ? 'filament' : key in (state.machine || {}) ? 'machine' : 'process');
     if (t === tab) delete state.overrides[key];
   }
 }
@@ -201,28 +202,54 @@ function effectiveMachine() {
   return m;
 }
 
-/** The ordered setting layers the engine applies for a slice. */
-function settingLayers() {
-  const slots = extruderCount(effectiveMachine());
+/** The ordered setting layers the engine applies for a slice of the given plates. */
+function settingLayers(plateIds = state.plates.map((p) => p.id)) {
+  const m = effectiveMachine();
+  const nozzles = extruderCount(m);
+  const fil = state.filamentCombined;
+  const total = (fil.filament_colour || ['']).length;
   const changes = {};
   for (const [k, v] of Object.entries(state.overrides)) {
     const base = baseValue(k);
     changes[k] = Array.isArray(v) && v.length === 1 && Array.isArray(base) && base.length > 1 ? Array(base.length).fill(v[0]) : v;
   }
+  const final = {
+    curr_bed_type: ui.bedTypeSelect.value,
+    printer_settings_id: state.printer.name,
+    print_settings_id: state.processName,
+    filament_settings_id: Array.from({ length: total }, (_, i) => (state.slots[i] || state.slots[0]).name),
+  };
+  if (total > 1) {
+    // Several filaments: which nozzle each one uses, and how much to purge
+    // between them (OrcaSlicer's colour-based estimate).
+    const colours = fil.filament_colour;
+    final.filament_colour = colours;
+    final.filament_self_index = colours.map((_, i) => String(i + 1));
+    final.filament_map = colours.map((_, i) => String(state.slots[i] ? state.slots[i].nozzle : Math.min(i + 1, nozzles)));
+    final.filament_map_mode = 'Manual';
+    const matrix = [];
+    for (let n = 0; n < nozzles; n++) {
+      for (let a = 0; a < total; a++) for (let b = 0; b < total; b++) matrix.push(String(a === b ? 0 : flushVolume(colours[a], colours[b])));
+    }
+    final.flush_volumes_matrix = matrix;
+    const mult = first(effective('flush_multiplier')) || '1';
+    final.flush_multiplier = Array(nozzles).fill(String(mult));
+  }
+  const used = new Set(state.objects.filter((o) => plateIds.includes(o.plateId)).map((o) => o.filament));
+  if (used.size > 1) {
+    // A plate with more than one filament needs the prime tower to purge into.
+    if (!('enable_prime_tower' in state.overrides)) final.enable_prime_tower = '1';
+    const tower = 'enable_prime_tower' in state.overrides ? first(state.overrides.enable_prime_tower) === '1' : true;
+    if (tower && String(first(effective('use_relative_e_distances'))) !== '1') final.use_relative_e_distances = '1';
+    const bambu = /^Bambu Lab/.test(String(first(m.printer_model) || ''));
+    const blc = String(first(effective('before_layer_change_gcode')) ?? '');
+    if (tower && !bambu && !/G92\s+E0/.test(blc)) final.before_layer_change_gcode = blc + (blc && !blc.endsWith('\n') ? '\n' : '') + 'G92 E0';
+  }
   return [
     { settings: state.machine },
     { settings: state.process },
-    { settings: filamentForSlots(state.filament, slots) },
-    {
-      format: 'orca.native-json',
-      settings: {
-        curr_bed_type: ui.bedTypeSelect.value,
-        printer_settings_id: state.printer.name,
-        print_settings_id: state.processName,
-        filament_settings_id: Array(slots).fill(state.filamentName),
-        ...changes,
-      },
-    },
+    { settings: fil },
+    { format: 'orca.native-json', settings: { ...final, ...changes } },
   ];
 }
 
@@ -248,7 +275,8 @@ async function initProfiles() {
     state.userPresets[t] = Array.isArray(state.saved.userPresets?.[t]) ? state.saved.userPresets[t] : [];
   }
   BED_TYPES.forEach((b) => ui.bedTypeSelect.append(option(b.value, b.label)));
-  await selectVendor(wanted, { printer: state.saved.printer, process: state.saved.process, filament: state.saved.filament, restoring: true });
+  const savedSlots = Array.isArray(state.saved.slots) ? state.saved.slots : null;
+  await selectVendor(wanted, { printer: state.saved.printer, process: state.saved.process, slots: savedSlots, restoring: true });
   if (state.saved.overrides && typeof state.saved.overrides === 'object') {
     state.overrides = { ...state.saved.overrides };
     for (const k of Object.keys(state.overrides)) setOverride(k, state.overrides[k]);
@@ -298,10 +326,9 @@ async function selectPrinter(value, prefer = {}) {
   ui.bedTypeSelect.value = BED_TYPES.some((b) => b.value === bedDefault) ? bedDefault : 'Textured PEI Plate';
 
   fillProcesses(prefer.process);
-  fillFilaments(prefer.filament);
   await Promise.all([
     selectProcess(ui.processSelect.value, prefer.restoring),
-    selectFilament(ui.filamentSelect.value, prefer.restoring),
+    setupSlots(prefer.slots || state.slots.map((x) => ({ value: x.value, colour: x.colour, nozzle: x.nozzle })), prefer.restoring),
   ]);
   updateBed(true);
   if (!prefer.restoring) settingsChanged();
@@ -337,41 +364,266 @@ function fillProcesses(preferred) {
       : (names.find((n) => /0\.20mm/.test(n)) || names[0]);
 }
 
-function fillFilaments(preferred) {
-  const v = state.vendor;
-  const groups = [];
-  const vendorNames = state.printer.filaments;
-  if (vendorNames.length) {
-    const g = document.createElement('optgroup');
-    g.label = `${v.vendor} filaments`;
-    vendorNames.forEach((n) => g.append(option(n, n)));
-    groups.push(g);
-  }
+// ---------------------------------------------------------------- filaments --
+
+const PALETTE = ['#F2A33A', '#4F9DDE', '#FFFFFF', '#2B2B2B', '#E2463A', '#3FB45B', '#A05FE0', '#FFD23F',
+  '#00A8B5', '#FF7FB0', '#8A5A2B', '#9AA5B1', '#1B3A8C', '#B8E04A', '#FF9E57', '#6B2E8F'];
+const FILAMENT_META = new Set([...METADATA_KEYS, 'filament_id', 'filament_settings_id']);
+
+function isSharedNozzle(m = effectiveMachine()) {
+  return String(first(m.single_extruder_multi_material)) === '1';
+}
+
+/** How many filaments the printer can use: one per tool head, or up to 16 through an AMS/MMU. */
+function maxSlots(m = effectiveMachine()) {
+  return isSharedNozzle(m) ? 16 : Math.max(1, extruderCount(m));
+}
+
+/** Option groups for a filament list, built once per printer. */
+let filamentOptionsHtml = '';
+function buildFilamentOptions() {
+  const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  const group = (label, items) => `<optgroup label="${esc(label)}">${items.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('')}</optgroup>`;
+  const parts = [];
+  if (state.userPresets.filament.length) parts.push(group('Imported', state.userPresets.filament.map((u) => ['user:' + u.name, u.name])));
+  if (state.printer.filaments.length) parts.push(group(`${state.vendor.vendor} filaments`, state.printer.filaments.map((n) => [n, n])));
   const byBrand = new Map();
   for (const f of state.library.filaments) {
     if (!byBrand.has(f.brand)) byBrand.set(f.brand, []);
-    byBrand.get(f.brand).push(f);
+    byBrand.get(f.brand).push(['lib:' + f.name, f.name]);
   }
-  for (const [brand, list] of byBrand) {
-    const g = document.createElement('optgroup');
-    g.label = brand;
-    list.forEach((f) => g.append(option('lib:' + f.name, f.name)));
-    groups.push(g);
-  }
-  if (state.userPresets.filament.length) {
-    const g = document.createElement('optgroup');
-    g.label = 'Imported';
-    state.userPresets.filament.forEach((u) => g.append(option('user:' + u.name, u.name)));
-    groups.unshift(g);
-  }
-  ui.filamentSelect.replaceChildren(...groups);
-  const all = [...ui.filamentSelect.querySelectorAll('option')].map((o) => o.value);
+  for (const [brand, list] of byBrand) parts.push(group(brand, list));
+  filamentOptionsHtml = parts.join('');
+}
+
+function filamentValues() {
+  const t = document.createElement('select');
+  t.innerHTML = filamentOptionsHtml;
+  return [...t.options].map((o) => o.value);
+}
+
+function defaultFilamentValue() {
+  const all = filamentValues();
   const def = state.printer.defaultFilament;
   const genericPla = all.find((n) => /Generic PLA/i.test(n) && !/silk|matte|high speed|\+|cf/i.test(n));
-  ui.filamentSelect.value = preferred && all.includes(preferred) ? preferred
-    : all.includes(def) ? def
-      : all.includes('lib:' + def) ? 'lib:' + def
-        : genericPla || all[0];
+  return all.includes(def) ? def : all.includes('lib:' + def) ? 'lib:' + def : genericPla || all[0];
+}
+
+async function loadFilament(value) {
+  if (value.startsWith('user:')) {
+    const u = state.userPresets.filament.find((x) => 'user:' + x.name === value);
+    return { settings: await resolveUserPreset(u.data), name: u.name };
+  }
+  if (value.startsWith('lib:')) {
+    const name = value.slice(4);
+    const entry = state.library.filaments.find((f) => f.name === name);
+    return { settings: await resolveFile(entry.file), name };
+  }
+  const entry = state.vendor.filaments.find((f) => f.name === value);
+  return { settings: await resolveFile(entry.file), name: value };
+}
+
+function presetColour(settings, index) {
+  const c = first(settings.default_filament_colour) || first(settings.filament_colour);
+  return /^#[0-9a-f]{6}$/i.test(c || '') && index === 0 ? c.toUpperCase() : PALETTE[index % PALETTE.length];
+}
+
+/** Rebuild the per-filament arrays the engine gets (one value per filament). */
+function recomputeFilaments() {
+  const slots = state.slots;
+  const m = state.machine || {};
+  // Tool-changer printers get one filament per tool head, even if fewer are in use.
+  const total = Math.max(slots.length, isSharedNozzle(m) ? 1 : extruderCount(m));
+  const keys = new Set();
+  for (const x of slots) for (const k of Object.keys(x.settings)) if (!FILAMENT_META.has(k)) keys.add(k);
+  const out = {};
+  const one = (v) => (Array.isArray(v) ? v[0] : v);
+  for (const key of keys) {
+    const vals = slots.map((x) => x.settings[key]);
+    const def = vals.find((v) => v !== undefined && v !== null);
+    if (def === undefined || (typeof def === 'object' && !Array.isArray(def))) continue;
+    if (!vals.some(Array.isArray)) { out[key] = def; continue; }
+    out[key] = Array.from({ length: total }, (_, i) => one(vals[i] !== undefined && vals[i] !== null ? vals[i] : (i < slots.length ? def : vals[0] ?? def)));
+  }
+  out.filament_colour = Array.from({ length: total }, (_, i) => (slots[i] || slots[0]).colour);
+  state.filamentCombined = out;
+}
+
+/** Changes the user made to each filament, keyed by slot, so they survive adding/removing filaments. */
+function captureSlotChanges() {
+  const map = {};
+  for (const [k, ov] of Object.entries(state.overrides)) {
+    const base = state.filamentCombined[k];
+    if (!Array.isArray(base) || !Array.isArray(ov)) continue;
+    state.slots.forEach((x, i) => {
+      if (i < ov.length && !same(ov[i], base[i])) (map[k] ||= {})[x.id] = ov[i];
+    });
+    map[k] ||= {};
+  }
+  return map;
+}
+
+function restoreSlotChanges(map, dropId) {
+  for (const k of Object.keys(map)) {
+    delete state.overrides[k];
+    const base = state.filamentCombined[k];
+    if (!Array.isArray(base)) continue;
+    const arr = base.slice();
+    let any = false;
+    state.slots.forEach((x, i) => {
+      if (x.id !== dropId && x.id in map[k]) { arr[i] = map[k][x.id]; any = true; }
+    });
+    if (any) setOverride(k, arr);
+  }
+}
+
+async function changeSlots(fn, dropId) {
+  const map = captureSlotChanges();
+  await fn();
+  recomputeFilaments();
+  restoreSlotChanges(map, dropId);
+  renderSlots();
+}
+
+/** (Re)create the filament list for the current printer, keeping earlier choices that still apply. */
+async function setupSlots(wanted, restoring) {
+  buildFilamentOptions();
+  const values = new Set(filamentValues());
+  const max = maxSlots();
+  const nozzles = extruderCount(effectiveMachine());
+  const list = (wanted && wanted.length ? wanted : [{}]).slice(0, max);
+  const run = async () => {
+    const next = [];
+    for (let i = 0; i < list.length; i++) {
+      const w = list[i];
+      const value = w.value && values.has(w.value) ? w.value : (next[0]?.value || defaultFilamentValue());
+      const { settings, name } = await loadFilament(value);
+      const old = state.slots[i];
+      next.push({
+        id: old && old.value === value ? old.id : state.nextSlot++,
+        value, name, settings,
+        colour: /^#[0-9a-f]{6}$/i.test(w.colour || '') ? w.colour.toUpperCase() : presetColour(settings, i),
+        nozzle: Math.min(Math.max(1, +w.nozzle || (isSharedNozzle() ? Math.min(i + 1, nozzles) : i + 1)), nozzles),
+      });
+    }
+    state.slots = next;
+  };
+  if (restoring) { await run(); recomputeFilaments(); renderSlots(); } else await changeSlots(run);
+  for (const item of state.objects) if (item.filament > state.slots.length) item.filament = 1;
+  if (!restoring) settingsChanged();
+}
+
+async function setSlotPreset(slot, value) {
+  await changeSlots(async () => {
+    const { settings, name } = await loadFilament(value);
+    Object.assign(slot, { value, settings, name, id: state.nextSlot++ });
+  });
+  settingsChanged();
+  editor?.render();
+}
+
+async function addSlot() {
+  if (state.slots.length >= maxSlots()) return;
+  const i = state.slots.length;
+  const base = state.slots[0];
+  const nozzles = extruderCount(effectiveMachine());
+  await changeSlots(async () => {
+    state.slots.push({
+      id: state.nextSlot++, value: base.value, name: base.name, settings: base.settings,
+      colour: PALETTE[i % PALETTE.length], nozzle: isSharedNozzle() ? Math.min(i + 1, nozzles) : i + 1,
+    });
+  });
+  settingsChanged();
+  editor?.render();
+}
+
+async function removeSlot(index) {
+  if (state.slots.length <= 1) return;
+  const slot = state.slots[index];
+  await changeSlots(async () => { state.slots.splice(index, 1); }, slot.id);
+  for (const item of state.objects) {
+    if (item.filament === index + 1) item.filament = 1;
+    else if (item.filament > index + 1) item.filament--;
+    viewer.updateObject(item);
+  }
+  invalidateAll();
+  settingsChanged();
+  objectsChanged();
+  editor?.render();
+}
+
+/** Make sure there are at least n filaments (e.g. a project uses filament 3). */
+async function ensureSlots(n) {
+  n = Math.min(n, maxSlots());
+  while (state.slots.length < n) await addSlot();
+}
+
+function slotLabel(i) {
+  const x = state.slots[i];
+  return x ? `${i + 1} · ${x.name}` : String(i + 1);
+}
+
+function renderSlots() {
+  const max = maxSlots();
+  const nozzles = extruderCount(effectiveMachine());
+  const pickNozzle = isSharedNozzle() && nozzles > 1;
+  ui.slotList.replaceChildren(...state.slots.map((slot, i) => {
+    const row = document.createElement('div');
+    row.className = 'slot';
+    const colour = document.createElement('input');
+    colour.type = 'color';
+    colour.value = slot.colour.toLowerCase();
+    colour.className = 'swatch';
+    colour.title = 'Filament colour (used for the preview and purge amounts)';
+    colour.setAttribute('aria-label', `Filament ${i + 1} colour`);
+    colour.onchange = () => { slot.colour = colour.value.toUpperCase(); recomputeFilaments(); refreshModelColours(); settingsChanged(); };
+    const num = document.createElement('span');
+    num.className = 'slot-num';
+    num.textContent = String(i + 1);
+    const sel = document.createElement('select');
+    sel.innerHTML = filamentOptionsHtml;
+    sel.value = slot.value;
+    sel.id = i === 0 ? 'filamentSelect' : `filamentSelect${i + 1}`;
+    sel.setAttribute('aria-label', `Filament ${i + 1}`);
+    sel.onchange = withBusy(() => setSlotPreset(slot, sel.value));
+    row.append(colour, num, sel);
+    if (pickNozzle) {
+      const nz = document.createElement('select');
+      nz.className = 'slot-nozzle';
+      nz.title = 'Which nozzle prints this filament';
+      for (let n = 1; n <= nozzles; n++) nz.append(option(String(n), nozzles === 2 ? (n === 1 ? 'Left' : 'Right') : `Nozzle ${n}`));
+      nz.value = String(slot.nozzle);
+      nz.onchange = () => { slot.nozzle = +nz.value; settingsChanged(); };
+      row.append(nz);
+    }
+    if (state.slots.length > 1) {
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'link slot-del';
+      del.textContent = '×';
+      del.title = `Remove filament ${i + 1}`;
+      del.setAttribute('aria-label', `Remove filament ${i + 1}`);
+      del.onclick = withBusy(() => removeSlot(i));
+      row.append(del);
+    }
+    return row;
+  }));
+  ui.addSlotBtn.hidden = state.slots.length >= max;
+  ui.addSlotBtn.textContent = '+ Add filament';
+  const model = String(first(effectiveMachine().printer_model) || '');
+  let hint = '';
+  if (!isSharedNozzle() && max > 1) hint = `This printer has ${max} tool heads: filament 1 is T0, filament 2 is T1, and so on.`;
+  else if (state.slots.length > 1 && !/Bambu Lab/.test(model)) hint = 'Use more than one filament only if this printer has a multi-material unit (AMS, MMU…).';
+  else if (state.slots.length > 1) hint = 'Pick each model\'s filament in its panel (click the model).';
+  if (state.slots.length > 1 && isSharedNozzle()) hint += ' A prime tower is added automatically for purging.';
+  ui.slotHint.textContent = hint.trim();
+  ui.slotHint.hidden = !hint;
+  renderObjectPanel();
+}
+
+function refreshModelColours() {
+  viewer.refreshColors();
+  renderObjectPanel();
 }
 
 async function selectProcess(value, keepChanges = false) {
@@ -386,27 +638,6 @@ async function selectProcess(value, keepChanges = false) {
   }
   if (!keepChanges) {
     clearOverrides('process');
-    settingsChanged();
-  }
-}
-
-async function selectFilament(value, keepChanges = false) {
-  if (value.startsWith('user:')) {
-    const u = state.userPresets.filament.find((x) => 'user:' + x.name === value);
-    state.filament = await resolveUserPreset(u.data);
-    state.filamentName = u.name;
-  } else if (value.startsWith('lib:')) {
-    const name = value.slice(4);
-    const entry = state.library.filaments.find((f) => f.name === name);
-    state.filament = await resolveFile(entry.file);
-    state.filamentName = name;
-  } else {
-    const entry = state.vendor.filaments.find((f) => f.name === value);
-    state.filament = await resolveFile(entry.file);
-    state.filamentName = value;
-  }
-  if (!keepChanges) {
-    clearOverrides('filament');
     settingsChanged();
   }
 }
@@ -498,7 +729,8 @@ async function importPresets(files) {
   if (!added.length) return;
   save();
   await selectVendor(state.vendor.vendor, {
-    printer: ui.printerSelect.value, process: ui.processSelect.value, filament: ui.filamentSelect.value, restoring: true,
+    printer: ui.printerSelect.value, process: ui.processSelect.value, restoring: true,
+    slots: state.slots.map((x) => ({ value: x.value, colour: x.colour, nozzle: x.nozzle })),
   });
   settingsChanged();
   showMessage(`Imported: ${added.join(', ')}. Pick them under "Imported" in the lists.`);
@@ -575,8 +807,9 @@ function deletePlate() {
 // ----------------------------------------------------------------- models --
 
 const viewer = new Viewer(ui.viewport);
+viewer.colourOf = (item) => state.slots[(item.filament || 1) - 1]?.colour || '#4F9DDE';
 
-function newItem({ name, positions, plateId, modifiers = [], x, y, quaternion, scale, placed = false }) {
+function newItem({ name, positions, plateId, modifiers = [], x, y, quaternion, scale, placed = false, filament = 1 }) {
   return {
     id: 'obj-' + state.nextId++,
     name,
@@ -589,6 +822,7 @@ function newItem({ name, positions, plateId, modifiers = [], x, y, quaternion, s
     scale: scale || [1, 1, 1],
     modifiers,
     placed,
+    filament: Math.max(1, Math.min(filament, state.slots.length || 1)),
   };
 }
 
@@ -657,6 +891,7 @@ async function add3mfModels(bytes, fileName) {
     addItem(newItem({ name: fileName.replace(/\.[^.]+$/, ''), positions }));
     return;
   }
+  await ensureSlots(Math.max(1, ...project.objects.map((o) => o.filament || 1)));
   const items = itemsFromProject(project, () => state.activePlate);
   for (const item of items) {
     addItem(item);
@@ -682,6 +917,7 @@ function itemsFromProject(project, plateFor) {
         name: obj.name,
         positions: obj.positions,
         plateId: plateFor(inst.plateIndex),
+        filament: (obj.filament || 1) <= state.slots.length ? obj.filament || 1 : 1,
         x: pos.x,
         y: pos.y,
         quaternion: q,
@@ -760,6 +996,12 @@ function objectsChanged() {
     b.type = 'button';
     b.textContent = o.name;
     b.title = o.name;
+    if (state.slots.length > 1) {
+      const dot = document.createElement('i');
+      dot.className = 'dot';
+      dot.style.background = state.slots[o.filament - 1]?.colour || '#999';
+      b.prepend(dot);
+    }
     if (o === sel) b.classList.add('selected');
     if (!viewer.isInside(o.id)) b.classList.add('outside');
     b.onclick = () => viewer.select(o.id);
@@ -822,6 +1064,7 @@ function duplicateSelected() {
     scale: [...item.scale],
     placed: true,
     modifiers: item.modifiers.map((m) => ({ ...m, id: 'mod-' + state.nextId++, matrix: m.matrix.clone() })),
+    filament: item.filament,
   });
   copy.stl = item.stl;
   addItem(copy);
@@ -922,6 +1165,10 @@ function renderObjectPanel() {
   ui.objName.textContent = item.name;
   ui.objPlate.value = item.plateId;
   ui.objPlate.parentElement.hidden = state.plates.length < 2;
+  ui.objFilament.replaceChildren(...state.slots.map((_, i) => option(String(i + 1), slotLabel(i))));
+  ui.objFilament.value = String(item.filament);
+  ui.objFilament.parentElement.parentElement.hidden = state.slots.length < 2;
+  ui.objSwatch.style.background = state.slots[item.filament - 1]?.colour || '#999';
   const mod = selectedModifier();
   ui.modList.replaceChildren(...item.modifiers.map((m, i) => {
     const b = document.createElement('button');
@@ -968,7 +1215,7 @@ function buildProject(plateIds) {
     if (!item.stl) item.stl = toBinaryStl(item.positions);
     const meshId = addMesh(item.positions, item.positions, item.stl);
     const geometry = viewer.objects.get(item.id).mesh.geometry;
-    objects.push({ id: item.id, meshId, label: item.name.slice(0, 200), extruderId: 0 });
+    objects.push({ id: item.id, meshId, label: item.name.slice(0, 200), extruderId: state.slots.length > 1 ? item.filament : 0 });
     instances.push({
       id: 'inst-' + item.id,
       objectId: item.id,
@@ -1035,7 +1282,7 @@ const arrange = withBusy(async (operation = 'arrange') => {
 
 const gcodeWorker = new Worker(new URL('../workers/gcode-worker.js', import.meta.url));
 let gcodeJob = 0;
-function parseGcodeForPreview(text) {
+function parseGcodeForPreview(text, palette) {
   const id = ++gcodeJob;
   return new Promise((resolve, reject) => {
     const onMessage = (event) => {
@@ -1044,7 +1291,7 @@ function parseGcodeForPreview(text) {
       if (event.data.ok) resolve(event.data); else reject(new Error(event.data.error));
     };
     gcodeWorker.addEventListener('message', onMessage);
-    gcodeWorker.postMessage({ id, text });
+    gcodeWorker.postMessage({ id, text, palette });
   });
 }
 
@@ -1079,10 +1326,10 @@ async function slice(all = false) {
   ui.progressFill.style.width = '0%';
   ui.progressText.textContent = 'Preparing…';
   const { blob, manifest } = buildProject(plateIds);
-  const job = engine.slice(settingLayers(), blob, manifest, plateIds, (p) => {
+  const job = engine.slice(settingLayers(plateIds), blob, manifest, plateIds, (p) => {
     if (Number.isFinite(p.percent)) ui.progressFill.style.width = p.percent + '%';
     if (p.stage) ui.progressText.textContent = p.stage;
-  });
+  }, isBambu());
   state.slicing = job;
   updateButtons();
   try {
@@ -1090,7 +1337,11 @@ async function slice(all = false) {
     for (const plate of res.plates) {
       state.results.set(plate.plateId, {
         gcode: new Uint8Array(plate.gcode),
+        package: plate.package ? new Uint8Array(plate.package) : null,
+        packageError: !!plate.packageError,
         statistics: plate.statistics,
+        colours: (state.filamentCombined.filament_colour || []).slice(),
+        names: state.slots.map((x) => x.name),
         name: outputName(plate.plateId),
         stale: false,
         skipped: res.skipped || [],
@@ -1113,13 +1364,19 @@ async function slice(all = false) {
   }
 }
 
+function isBambu() {
+  return /^Bambu Lab/.test(String(first(effectiveMachine().printer_model) || ''));
+}
+
+let previewMode = 'feature';
 async function showPreview(plateId) {
   const r = state.results.get(plateId);
   if (!r) return;
   if (state.previewPlate !== plateId || !viewer.previewData) {
-    const preview = await parseGcodeForPreview(new TextDecoder().decode(r.gcode));
+    const preview = await parseGcodeForPreview(new TextDecoder().decode(r.gcode), r.colours);
     viewer.setPreview(preview);
     state.previewPlate = plateId;
+    state.previewResult = r;
     setupLayerSlider(preview);
   }
 }
@@ -1139,6 +1396,17 @@ function renderResult() {
   const grams = f.totalMassG, metres = (f.totalLengthMm || 0) / 1000;
   ui.rFilament.textContent = Number.isFinite(grams) && grams > 0 ? `${grams.toFixed(1)} g` : metres ? `${metres.toFixed(2)} m` : '–';
   ui.rFilament.title = metres ? `${metres.toFixed(2)} m of filament` : '';
+  const masses = (f.massGByExtruder || []).map((g, i) => [i, g]).filter(([, g]) => g > 0.005);
+  ui.rBreakdown.replaceChildren(...(masses.length > 1 ? masses.map(([i, g]) => {
+    const li = document.createElement('li');
+    const dot = document.createElement('i');
+    dot.style.background = (r.colours || [])[i] || '#999';
+    li.append(dot, document.createTextNode(`${i + 1} · ${(r.names || [])[i] || ''}: ${g.toFixed(1)} g`));
+    return li;
+  }) : []));
+  ui.rBreakdown.hidden = masses.length < 2;
+  ui.download3mfBtn.hidden = !r.package;
+  ui.download3mfBtn.disabled = r.stale;
   ui.result.classList.toggle('stale', r.stale);
   ui.downloadBtn.disabled = r.stale;
   const skipped = r.skipped || [];
@@ -1146,7 +1414,10 @@ function renderResult() {
     ? 'Settings or models changed: slice again to update the G-code.'
     : (skipped.length
       ? `Note: ${skipped.length} setting(s) were not accepted by the engine and were left at their defaults (${skipped.slice(0, 4).map((s) => s.key).join(', ')}${skipped.length > 4 ? ', …' : ''}). `
-      : '') + 'Copy the file to your printer (SD card, USB stick or its own upload page).';
+      : '') + (r.package
+      ? 'For a Bambu printer, copy the .gcode.3mf file to its SD card. '
+      : r.packageError ? 'The .gcode.3mf package could not be made; the plain G-code is still available. ' : '')
+      + 'Copy the file to your printer (SD card, USB stick or its own upload page).';
 }
 
 function outputName(plateId) {
@@ -1155,8 +1426,15 @@ function outputName(plateId) {
   const plate = state.plates.length > 1 ? `plate${state.plates.findIndex((p) => p.id === plateId) + 1}` : '';
   const printer = (state.printer.model || state.printer.name).replace(/\s+/g, '');
   const layer = first(effective('layer_height'));
-  const mat = first(state.filament.filament_type) || '';
+  const used = [...new Set(items.map((o) => o.filament))];
+  const mat = used.length > 1 ? `${used.length}colour` : first(state.slots[(used[0] || 1) - 1]?.settings.filament_type) || '';
   return [base, plate, layer ? `${layer}mm` : '', mat, printer].filter(Boolean).map(safeName).join('_') + '.gcode';
+}
+
+function download3mf() {
+  const r = state.results.get(state.activePlate);
+  if (!r || r.stale || !r.package) return;
+  downloadBytes(r.package, r.name.replace(/\.gcode$/, '.gcode.3mf'), 'model/3mf');
 }
 
 function download() {
@@ -1166,10 +1444,9 @@ function download() {
 }
 
 function downloadAll() {
-  const files = state.plates
-    .map((p) => state.results.get(p.id))
-    .filter((r) => r && !r.stale)
-    .map((r) => ({ name: r.name, data: r.gcode }));
+  const fresh = state.plates.map((p) => state.results.get(p.id)).filter((r) => r && !r.stale);
+  const files = fresh.flatMap((r) => [{ name: r.name, data: r.gcode }]
+    .concat(r.package ? [{ name: r.name.replace(/\.gcode$/, '.gcode.3mf'), data: r.package }] : []));
   if (!files.length) return;
   downloadBytes(makeZip(files), safeName(state.projectName || 'plates') + '_gcode.zip', 'application/zip');
 }
@@ -1179,13 +1456,40 @@ function setupLayerSlider(preview) {
   ui.layerSlider.max = String(Math.max(1, n));
   ui.layerSlider.value = String(Math.max(1, n));
   updateLayerLabel();
-  ui.legend.replaceChildren(...preview.features.map((f) => {
+  if (!preview.toolColors || preview.tools.length < 2) previewMode = 'feature';
+  viewer.setPreviewMode(previewMode);
+  renderLegend();
+}
+
+function renderLegend() {
+  const d = viewer.previewData;
+  if (!d) return;
+  const items = [];
+  if (d.toolColors && d.tools.length > 1) {
+    const li = document.createElement('li');
+    li.className = 'legend-mode';
+    for (const [mode, label] of [['feature', 'Type'], ['filament', 'Filament']]) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      b.className = previewMode === mode ? 'active' : '';
+      b.onclick = () => { previewMode = mode; viewer.setPreviewMode(mode); renderLegend(); };
+      li.append(b);
+    }
+    items.push(li);
+  }
+  const r = state.previewResult || {};
+  const rows = previewMode === 'filament'
+    ? d.tools.map((t) => ({ name: `${t + 1} · ${(r.names || [])[t] || 'Filament ' + (t + 1)}`, color: (r.colours || [])[t] || '#999' }))
+    : d.features;
+  for (const f of rows) {
     const li = document.createElement('li');
     const sw = document.createElement('i');
     sw.style.background = f.color;
     li.append(sw, document.createTextNode(f.name));
-    return li;
-  }));
+    items.push(li);
+  }
+  ui.legend.replaceChildren(...items);
 }
 
 function updateLayerLabel() {
@@ -1292,6 +1596,16 @@ const openProject = withBusy(async (file) => {
   state.plates = [];
   state.nextPlate = 1;
   const plateIds = project.plates.map((p) => addPlate(p.name).id);
+  const needed = Math.max(1, ...project.objects.map((o) => o.filament || 1));
+  if (needed > state.slots.length) {
+    const before = state.slots.length;
+    await ensureSlots(needed);
+    if (state.slots.length < needed) {
+      notes.push(`This project uses ${needed} filaments but the selected printer takes ${state.slots.length}; models for the others use filament 1.`);
+    } else if (state.slots.length > before) {
+      notes.push(`Added filaments ${before + 1}–${state.slots.length} for the coloured models; set their materials and colours in the Filament list.`);
+    }
+  }
   const items = itemsFromProject(project, (i) => plateIds[i] || plateIds[0]);
   for (const item of items) addItem(item);
   setActivePlate(plateIds.find((id) => objectsOn(id).length) || plateIds[0]);
@@ -1310,7 +1624,6 @@ async function applyProjectSettings(config) {
   const want = {
     printer: first(config.printer_settings_id),
     process: first(config.print_settings_id),
-    filament: first(config.filament_settings_id),
   };
   const names = await loadNames();
   let vendorName = state.vendor.vendor;
@@ -1322,8 +1635,9 @@ async function applyProjectSettings(config) {
   }
   const filamentValue = (n) => {
     if (!n) return null;
-    if (state.vendor && (state.vendor.filaments || []).some((f) => f.name === n)) return n;
-    if (state.library.filaments.some((f) => f.name === n)) return 'lib:' + n;
+    const all = new Set(filamentValues());
+    if (all.has(n)) return n;
+    if (all.has('lib:' + n)) return 'lib:' + n;
     return null;
   };
   await selectVendor(vendorName, { printer: machineFile ? want.printer : ui.printerSelect.value, restoring: true });
@@ -1331,15 +1645,21 @@ async function applyProjectSettings(config) {
     ui.processSelect.value = want.process;
     await selectProcess(want.process, true);
   }
-  const fv = filamentValue(want.filament);
-  if (fv && [...ui.filamentSelect.options].some((o) => o.value === fv)) {
-    ui.filamentSelect.value = fv;
-    await selectFilament(fv, true);
-  }
+  // The project's filaments, colours and nozzles become the filament list.
+  const filamentNames = [].concat(config.filament_settings_id || []).filter(Boolean);
+  const colours = [].concat(config.filament_colour || []);
+  const maps = [].concat(config.filament_map || []);
+  const unknown = [];
+  const wantedSlots = filamentNames.slice(0, maxSlots()).map((n, i) => {
+    const v = filamentValue(n);
+    if (!v) unknown.push(n);
+    return { value: v || null, colour: colours[i], nozzle: +maps[i] || undefined };
+  });
+  if (wantedSlots.length) await setupSlots(wantedSlots, true);
   const missing = [];
   if (want.printer && ui.printerSelect.value !== want.printer) missing.push(`printer "${want.printer}"`);
   if (want.process && state.processName !== want.process) missing.push(`print profile "${want.process}"`);
-  if (want.filament && state.filamentName !== want.filament) missing.push(`filament "${want.filament}"`);
+  if (unknown.length) missing.push(`filament ${[...new Set(unknown)].map((n) => `"${n}"`).join(', ')}`);
   if (missing.length) notes.push(`This site has no ${missing.join(', ')}; the closest selection is used and the project's values are kept as changes.`);
 
   state.overrides = {};
@@ -1377,6 +1697,7 @@ async function initEditor() {
     override: (key) => state.overrides[key],
     set: (key, value) => setOverride(key, value),
     onChange: () => settingsChanged(),
+    slots: () => state.slots.map((_, i) => slotLabel(i)),
     otherCount: () => Object.keys(state.overrides).filter((k) => !state.keyTab.has(k)).length,
     clearOther: () => { for (const k of Object.keys(state.overrides)) if (!state.keyTab.has(k)) delete state.overrides[k]; },
   });
@@ -1388,7 +1709,7 @@ async function initEditor() {
 ui.vendorSelect.onchange = withBusy(() => selectVendor(ui.vendorSelect.value));
 ui.printerSelect.onchange = withBusy(() => selectPrinter(ui.printerSelect.value));
 ui.processSelect.onchange = withBusy(async () => { await selectProcess(ui.processSelect.value); editor?.render(); });
-ui.filamentSelect.onchange = withBusy(async () => { await selectFilament(ui.filamentSelect.value); editor?.render(); });
+ui.addSlotBtn.onclick = withBusy(addSlot);
 ui.bedTypeSelect.onchange = () => { invalidateAll(); save(); };
 for (const el of [ui.qLayer, ui.qInfill, ui.qWalls, ui.qSupport, ui.qBrim]) el.addEventListener('change', quickChanged);
 ui.resetQuick.onclick = () => {
@@ -1416,6 +1737,7 @@ ui.sliceAllBtn.onclick = () => slice(true);
 ui.cancelBtn.onclick = () => state.slicing && state.slicing.cancel();
 ui.downloadBtn.onclick = download;
 ui.downloadAllBtn.onclick = downloadAll;
+ui.download3mfBtn.onclick = download3mf;
 ui.tabPrepare.onclick = () => setTab('prepare');
 ui.tabPreview.onclick = async () => {
   if (ui.tabPreview.disabled) return;
@@ -1428,6 +1750,15 @@ ui.aboutBtn.onclick = () => ui.aboutDialog.showModal();
 ui.addPlateBtn.onclick = () => { const p = addPlate(); setActivePlate(p.id); };
 ui.delPlateBtn.onclick = deletePlate;
 ui.objPlate.onchange = () => moveSelectedToPlate(ui.objPlate.value);
+ui.objFilament.onchange = () => {
+  const item = selected();
+  if (!item) return;
+  item.filament = +ui.objFilament.value;
+  viewer.refreshColors();
+  invalidatePlate(item.plateId);
+  renderObjectPanel();
+  objectsChanged();
+};
 ui.addEnforcer.onclick = () => addModifier('support-enforcer');
 ui.addBlocker.onclick = () => addModifier('support-blocker');
 for (const inp of [ui.modX, ui.modY, ui.modZ, ui.modW, ui.modD, ui.modH]) inp.addEventListener('change', editModifier);

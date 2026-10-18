@@ -121,6 +121,20 @@ async function configuredSession(engine, layers) {
   return { session, skipped };
 }
 
+/** The manifest reduced to one plate (and only what that plate uses). */
+function plateManifest(manifest, plateId) {
+  const instances = manifest.instances.filter((i) => i.plateId === plateId);
+  const objectIds = new Set(instances.map((i) => i.objectId));
+  const plate = manifest.plates.find((p) => p.id === plateId);
+  return {
+    ...manifest,
+    plates: [{ ...plate, index: 0 }],
+    objects: manifest.objects.filter((o) => objectIds.has(o.id)),
+    instances,
+    modifierVolumes: (manifest.modifierVolumes || []).filter((m) => m.plateId === plateId),
+  };
+}
+
 const handlers = {
   async load() {
     await loadEngine();
@@ -150,31 +164,60 @@ const handlers = {
     }
   },
 
-  async slice({ id, layers, blob, manifest, plateIds }) {
+  async slice({ id, layers, blob, manifest, plateIds, packaged }) {
     const engine = await loadEngine();
     const { session, skipped } = await configuredSession(engine, layers);
     const controller = new AbortController();
     abortControllers.set(id, controller);
-    try {
-      await session.setObjects(new Uint8Array(blob), manifest);
-      const result = await session.slice({
-        schemaVersion: manifest.schemaVersion,
+    const data = new Uint8Array(blob);
+    const sliceSome = async (ids, mf, progressBase, progressSpan) => {
+      await session.setObjects(data, mf);
+      return session.slice({
+        schemaVersion: mf.schemaVersion,
         plateSelection: 'selected',
-        plateIds,
+        plateIds: ids,
         includeGcode: true,
         includeStatistics: true,
       }, {
         signal: controller.signal,
-        onProgress: (p) => post({ type: 'progress', id, percent: p.percent, stage: p.stage }),
+        onProgress: (p) => post({
+          type: 'progress', id,
+          percent: p.percent == null ? null : progressBase + (p.percent * progressSpan) / 100,
+          stage: p.stage,
+        }),
       });
+    };
+    try {
       const plates = [];
       const transfer = [];
-      for (const plate of result.plateResults || []) {
+      const collect = async (plate, pkg) => {
         const asset = (plate.assets || []).find((a) => a.kind === 'gcode');
         if (!asset) throw Object.assign(new Error('The engine finished but returned no G-code for ' + plate.plateId + '.'), { code: 'NO_DATA' });
         const gcode = await session.getAsset(asset.id);
-        plates.push({ plateId: plate.plateId, gcode: gcode.buffer, statistics: plate.statistics || null });
+        const entry = { plateId: plate.plateId, gcode: gcode.buffer, statistics: plate.statistics || null };
         transfer.push(gcode.buffer);
+        if (pkg) { entry.package = pkg.buffer; transfer.push(pkg.buffer); }
+        if (pkg === null) entry.packageError = true;
+        plates.push(entry);
+      };
+      if (!packaged) {
+        const result = await sliceSome(plateIds, manifest, 0, 100);
+        for (const plate of result.plateResults || []) await collect(plate);
+      } else {
+        // Bambu printers read a sliced project (.gcode.3mf) from the SD card:
+        // slice each plate on its own and package it the way desktop OrcaSlicer does.
+        for (let i = 0; i < plateIds.length; i++) {
+          const sub = plateManifest(manifest, plateIds[i]);
+          const result = await sliceSome([plateIds[i]], sub, (i * 100) / plateIds.length, 100 / plateIds.length);
+          let pkg = null;
+          try {
+            const out = await session.export('project.3mf', { schemaVersion: sub.schemaVersion, preservation: 'portable', includeSliceArtifacts: true });
+            pkg = await session.getAsset((out && out.asset && out.asset.id) || 'project:export');
+          } catch (error) {
+            post({ type: 'log', message: 'packaging failed: ' + (error && error.message) });
+          }
+          for (const plate of result.plateResults || []) await collect(plate, pkg);
+        }
       }
       return { transfer, value: { plates, skipped } };
     } finally {

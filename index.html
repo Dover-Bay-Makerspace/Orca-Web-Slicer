@@ -44,7 +44,9 @@
 
       <section class="panel">
         <h2>Filament</h2>
-        <label class="field"><span>Material</span><select id="filamentSelect"></select></label>
+        <div id="slotList" class="slot-list"></div>
+        <button id="addSlotBtn" class="link add-slot" type="button">+ Add filament</button>
+        <p id="slotHint" class="hint" hidden></p>
       </section>
 
       <section class="panel">
@@ -93,6 +95,8 @@
             <div><dt>Print time</dt><dd id="rTime">–</dd></div>
             <div><dt>Filament</dt><dd id="rFilament">–</dd></div>
           </dl>
+          <ul id="rBreakdown" class="breakdown" hidden></ul>
+          <button id="download3mfBtn" class="primary" type="button" hidden>Download for Bambu (.gcode.3mf)</button>
           <button id="downloadBtn" class="primary" type="button">Download G-code</button>
           <p class="hint" id="rNote"></p>
         </div>
@@ -137,6 +141,7 @@
         <div id="objPanel" class="obj-panel" hidden>
           <div class="obj-head"><strong id="objName"></strong></div>
           <label class="field inline"><span>Plate</span><select id="objPlate"></select></label>
+          <div><label class="field inline"><span>Filament</span><i id="objSwatch" class="obj-swatch"></i><select id="objFilament"></select></label></div>
           <div class="obj-section">
             <span class="obj-label">Support boxes</span>
             <div class="mod-add">
