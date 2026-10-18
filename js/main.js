@@ -1005,6 +1005,12 @@ function setActivePlate(id) {
 }
 
 function renderPlates() {
+  // The 3D view shows every plate side by side; redraw it only when the plates change.
+  const layout = state.plates.map((p) => p.id).join() + '|' + state.activePlate;
+  if (layout !== viewer.plateLayout) {
+    viewer.plateLayout = layout;
+    viewer.setPlates(state.plates.map((p) => p.id), state.activePlate);
+  }
   ui.plateList.replaceChildren(...state.plates.map((p) => {
     const b = document.createElement('button');
     b.type = 'button';
@@ -1309,7 +1315,7 @@ function placeNewObjects() {
 }
 
 function footprint(item) {
-  const b = viewer.worldBox(item.id);
+  const b = viewer.bedBox(item.id);
   return b ? { w: b.max.x - b.min.x, d: b.max.y - b.min.y, cx: (b.max.x + b.min.x) / 2 - item.x, cy: (b.max.y + b.min.y) / 2 - item.y } : null;
 }
 
@@ -1318,7 +1324,7 @@ function findFreeSpot(item) {
   const f = footprint(item);
   if (!f) return null;
   const gap = 5;
-  const others = objectsOn(item.plateId).filter((o) => o !== item).map((o) => viewer.worldBox(o.id)).filter(Boolean);
+  const others = objectsOn(item.plateId).filter((o) => o !== item).map((o) => viewer.bedBox(o.id)).filter(Boolean);
   const candidates = [];
   const step = 5;
   const round = viewer.bed.shape === 'circle';
@@ -2552,7 +2558,7 @@ function setTheme(choice) {
 for (const b of document.querySelectorAll('[data-theme-choice]')) b.onclick = () => setTheme(b.dataset.themeChoice);
 setTheme(document.documentElement.dataset.theme || 'auto');
 
-ui.addPlateBtn.onclick = () => { const p = addPlate(); setActivePlate(p.id); };
+ui.addPlateBtn.onclick = () => { const p = addPlate(); setActivePlate(p.id); viewer.framePlates(); };
 ui.delPlateBtn.onclick = deletePlate;
 ui.objPlate.onchange = () => moveSelectedToPlate(ui.objPlate.value);
 ui.objFilament.onchange = () => {
@@ -2580,7 +2586,13 @@ ui.saveBtn.onclick = saveProject;
 
 // Handy for debugging in the browser console (and used by the tests).
 window.orcaWeb = { viewer, state };
-viewer.addEventListener('select', () => objectsChanged());
+viewer.addEventListener('select', (e) => {
+  // Picking a model on another plate makes that plate the active one.
+  const item = e.detail.id && state.objects.find((o) => o.id === e.detail.id);
+  if (item && item.plateId !== state.activePlate) { setActivePlate(item.plateId); return; }
+  objectsChanged();
+});
+viewer.addEventListener('plate', (e) => setActivePlate(e.detail.id));
 viewer.addEventListener('tool', (e) => {
   ui.rotateTool.setAttribute('aria-pressed', String(e.detail.tool === 'rotate'));
   ui.layFlatTool.setAttribute('aria-pressed', String(e.detail.tool === 'layflat'));
@@ -2597,6 +2609,12 @@ viewer.addEventListener('move', (e) => {
   }
   const item = state.objects.find((o) => o.id === e.detail.id);
   if (item) invalidatePlate(item.plateId);
+  if (e.detail.fromPlate) {
+    // Dragged onto another plate.
+    invalidatePlate(e.detail.fromPlate);
+    setActivePlate(item.plateId);
+    return;
+  }
   objectsChanged();
 });
 

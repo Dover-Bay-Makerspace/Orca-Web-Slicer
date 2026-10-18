@@ -635,6 +635,29 @@ try {
     check('auto-orient and arrange work on a model turned by any angle', !/failed/i.test(om) && !/failed/i.test(await msg(up)), om + ' | ' + await msg(up));
     await up.click('#addPlateBtn');
     check('adding a plate is an undo step', (await up.$$('.plate-chip')).length === 2);
+    // Both plates are drawn side by side; drag the model from plate 1 onto plate 2.
+    const plates = await up.evaluate(() => {
+      const v = window.orcaWeb.viewer;
+      const rect = v.renderer.domElement.getBoundingClientRect();
+      const scr = (p) => { const q = p.clone().project(v.camera); return [rect.left + (q.x + 1) / 2 * rect.width, rect.top + (1 - q.y) / 2 * rect.height]; };
+      const o = [...v.objects.values()][0];
+      const b = v.worldBox(o.item.id);
+      const c = b.getCenter(b.min.clone()).setZ(b.max.z);
+      const off2 = v.plateOffset(v.plateIds[1]);
+      const target = c.clone().add(off2);
+      return { beds: v.bedGroup.children.length, from: scr(c), to: scr(target) };
+    });
+    await up.screenshot({ path: path.join(OUT, '18-two-plates.png') });
+    await up.mouse.move(...plates.from);
+    await up.mouse.down();
+    await up.mouse.move(...plates.to, { steps: 12 });
+    await up.mouse.up();
+    await up.waitForTimeout(300);
+    const after = await up.$$eval('.plate-chip .chip-meta', (e) => e.map((x) => x.textContent.trim()));
+    check('both plates are shown, and a model can be dragged onto another plate', plates.beds === 2 && after[0].startsWith('0') && after[1].startsWith('1')
+      && (await up.$eval('.plate-chip.active', (e) => e.textContent)).startsWith('Plate 2'), JSON.stringify({ beds: plates.beds, after }));
+    await up.click('#undoBtn');
+    check('undo puts it back on plate 1', (await up.$$eval('.plate-chip .chip-meta', (e) => e.map((x) => x.textContent.trim())))[0].startsWith('1'));
     await up.click('#undoBtn');
     check('...and undo removes it again', (await up.$$('.plate-chip')).length === 1);
     await uctx.close();

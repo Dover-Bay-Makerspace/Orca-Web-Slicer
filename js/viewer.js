@@ -47,6 +47,7 @@ export class Viewer extends EventTarget {
     this.selectedId = null;
     this.selectedModifierId = null;
     this.activePlate = null;
+    this.plateIds = [];
     this.mode = 'prepare';
     this.bed = { x0: 0, y0: 0, width: 256, depth: 256, height: 250, shape: 'rectangle' };
 
@@ -69,8 +70,8 @@ export class Viewer extends EventTarget {
     // updated) instead of every frame: much lighter on school computers.
     this.needsRender = true;
     for (const name of ['applyTheme', 'resize', 'setBed', 'resetCamera', 'addObject', 'addModifier', 'updateModifier',
-      'removeModifier', 'applyPlateVisibility', 'removeObject', 'updateObject', 'refreshColors', 'select', 'setMode',
-      'setPreview', 'setPreviewMode', 'setFeatureHidden', 'showLayers', 'clearPreview', 'frame', 'frameModels', 'setTool']) {
+      'removeModifier', 'applyPlateVisibility', 'setPlates', 'removeObject', 'updateObject', 'refreshColors', 'select', 'setMode',
+      'setPreview', 'setPreviewMode', 'setFeatureHidden', 'showLayers', 'clearPreview', 'frame', 'frameModels', 'framePlates', 'setTool']) {
       const original = this[name].bind(this);
       this[name] = (...args) => {
         const result = original(...args);
@@ -114,22 +115,69 @@ export class Viewer extends EventTarget {
 
   setBed(bed) {
     this.bed = { x0: 0, y0: 0, ...bed };
-    this.bedGroup.clear();
-    // The bed group sits at the bed's front-left corner in printer coordinates.
-    this.bedGroup.position.set(this.bed.x0, this.bed.y0, 0);
-    const { width: W, depth: D, height: H } = this.bed;
-    const c = this.bedColors || {};
-    const plateMat = new THREE.MeshBasicMaterial({ color: c.plate || 0x2b3138 });
-    let plate;
-    if (bed.shape === 'circle') {
-      plate = new THREE.Mesh(new THREE.CircleGeometry(W / 2, 96), plateMat);
-      plate.position.set(W / 2, D / 2, -0.05);
-    } else {
-      plate = new THREE.Mesh(new THREE.PlaneGeometry(W, D), plateMat);
-      plate.position.set(W / 2, D / 2, -0.05);
+    this.#drawBeds();
+    for (const o of this.objects.values()) this.updateObject(o.item);
+    this.refreshColors();
+  }
+
+  /**
+   * The plates to show, in order, laid out like OrcaSlicer: a grid with
+   * ceil(sqrt(n)) columns, 1.2 bed widths apart, later rows towards the front.
+   */
+  setPlates(ids, activeId = this.activePlate) {
+    this.plateIds = [...ids];
+    this.activePlate = activeId;
+    this.#drawBeds();
+    for (const o of this.objects.values()) this.updateObject(o.item);
+    if (this.previewData) this.previewGroup.position.copy(this.plateOffset(this.activePlate));
+  }
+
+  /** Where a plate sits in the 3D view, relative to the first plate. */
+  plateOffset(id) {
+    const n = Math.max(1, this.plateIds.length);
+    const i = Math.max(0, this.plateIds.indexOf(id));
+    const cols = Math.ceil(Math.sqrt(n));
+    return new THREE.Vector3((i % cols) * this.bed.width * 1.2, -Math.floor(i / cols) * this.bed.depth * 1.2, 0);
+  }
+
+  /** The plate under a point of the 3D view (or null). */
+  plateAt(x, y) {
+    for (const id of this.plateIds.length ? this.plateIds : [this.activePlate]) {
+      const off = this.plateOffset(id);
+      const lx = x - off.x, ly = y - off.y;
+      if (lx >= this.bed.x0 && lx <= this.bed.x0 + this.bed.width && ly >= this.bed.y0 && ly <= this.bed.y0 + this.bed.depth) return id;
     }
+    return null;
+  }
+
+  #drawBeds() {
+    for (const child of [...this.bedGroup.children]) {
+      child.traverse((c) => { c.geometry?.dispose?.(); if (c.material) { c.material.map?.dispose?.(); c.material.dispose?.(); } });
+    }
+    this.bedGroup.clear();
+    const ids = this.plateIds.length ? this.plateIds : [this.activePlate];
+    ids.forEach((id, index) => {
+      const g = this.#bedFor(id, index, ids.length > 1 && id === this.activePlate);
+      const off = this.plateOffset(id);
+      g.position.set(this.bed.x0 + off.x, this.bed.y0 + off.y, 0);
+      this.bedGroup.add(g);
+    });
+  }
+
+  #bedFor(id, index, active) {
+    const group = new THREE.Group();
+    const { width: W, depth: D, height: H, shape } = this.bed;
+    const c = this.bedColors || {};
+    const plateColour = new THREE.Color(c.plate || 0x2b3138);
+    if (active) plateColour.lerp(new THREE.Color(0xf2a33a), 0.08);
+    const plateMat = new THREE.MeshBasicMaterial({ color: plateColour });
+    const plate = shape === 'circle'
+      ? new THREE.Mesh(new THREE.CircleGeometry(W / 2, 96), plateMat)
+      : new THREE.Mesh(new THREE.PlaneGeometry(W, D), plateMat);
+    plate.position.set(W / 2, D / 2, -0.05);
     plate.name = 'plate';
-    this.bedGroup.add(plate);
+    plate.userData.plateId = id;
+    group.add(plate);
 
     const grid = [];
     const step = W > 400 || D > 400 ? 20 : 10;
@@ -137,19 +185,39 @@ export class Viewer extends EventTarget {
     for (let y = 0; y <= D + 0.01; y += step) grid.push(0, y, 0, W, y, 0);
     const gridGeo = new THREE.BufferGeometry();
     gridGeo.setAttribute('position', new THREE.Float32BufferAttribute(grid, 3));
-    this.bedGroup.add(new THREE.LineSegments(gridGeo, new THREE.LineBasicMaterial({ color: c.grid || 0x3a424b })));
+    group.add(new THREE.LineSegments(gridGeo, new THREE.LineBasicMaterial({ color: c.grid || 0x3a424b })));
 
     const box = new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(W, D, H));
-    const helper = new THREE.Box3Helper(box, c.edge || 0x6b7682);
+    const helper = new THREE.Box3Helper(box, active ? 0xf2a33a : (c.edge || 0x6b7682));
     helper.material.transparent = true;
-    helper.material.opacity = 0.45;
-    this.bedGroup.add(helper);
+    helper.material.opacity = active ? 0.8 : 0.45;
+    group.add(helper);
 
-    // A small marker at the printer's 0,0 point, like the desktop app.
-    const axes = new THREE.AxesHelper(Math.min(W, D) * 0.08);
-    axes.position.set(-this.bed.x0, -this.bed.y0, 0.05);
-    this.bedGroup.add(axes);
-    this.refreshColors();
+    if (index === 0) {
+      // A small marker at the printer's 0,0 point, like the desktop app.
+      const axes = new THREE.AxesHelper(Math.min(W, D) * 0.08);
+      axes.position.set(-this.bed.x0, -this.bed.y0, 0.05);
+      group.add(axes);
+    }
+    if (this.plateIds.length > 1) {
+      // Plate number in front of each plate.
+      const canvas = document.createElement('canvas');
+      canvas.width = 128; canvas.height = 64;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = active ? '#f2a33a' : (c.edge ? '#' + new THREE.Color(c.edge).getHexString() : '#6b7682');
+      ctx.font = 'bold 52px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(index + 1), 64, 34);
+      const tex = new THREE.CanvasTexture(canvas);
+      const label = new THREE.Mesh(new THREE.PlaneGeometry(1, 0.5), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }));
+      const size = Math.max(30, Math.min(W, D) * 0.3);
+      label.scale.set(size, size, 1);
+      label.position.set(W / 2, -size * 0.3, 0.05);
+      label.userData.plateId = id;
+      group.add(label);
+    }
+    return group;
   }
 
   /** Centre of the bed in printer coordinates. */
@@ -160,7 +228,8 @@ export class Viewer extends EventTarget {
   resetCamera() {
     const { width: W, depth: D, height: H } = this.bed;
     const h = Math.min(H, Math.max(W, D) * 0.6);
-    const center = new THREE.Vector3(this.bed.x0 + W / 2, this.bed.y0 + D / 2, h * 0.25);
+    const off = this.plateOffset(this.activePlate);
+    const center = new THREE.Vector3(this.bed.x0 + W / 2 + off.x, this.bed.y0 + D / 2 + off.y, h * 0.25);
     const radius = 0.5 * Math.hypot(W, D, h);
     const vfov = THREE.MathUtils.degToRad(this.camera.fov);
     const hfov = 2 * Math.atan(Math.tan(vfov / 2) * this.camera.aspect);
@@ -310,14 +379,16 @@ export class Viewer extends EventTarget {
     this.refreshColors();
   }
 
-  /** Only the models on the active plate are shown. */
+  /** The plate being worked on is highlighted; models on every plate are shown. */
   setActivePlate(plateId) {
+    const changed = plateId !== this.activePlate;
     this.activePlate = plateId;
+    if (changed) this.#drawBeds();
     this.applyPlateVisibility();
   }
 
   applyPlateVisibility() {
-    for (const o of this.objects.values()) o.mesh.visible = !this.activePlate || o.item.plateId === this.activePlate;
+    for (const o of this.objects.values()) o.mesh.visible = true;
     this.#placeGizmo();
   }
 
@@ -335,7 +406,9 @@ export class Viewer extends EventTarget {
   updateObject(item) {
     const o = this.objects.get(item.id);
     if (!o) return;
-    o.mesh.matrix.copy(instanceMatrix(item, o.mesh.geometry));
+    const off = this.plateOffset(item.plateId);
+    o.localMatrix = instanceMatrix(item, o.mesh.geometry); // placement on its own plate
+    o.mesh.matrix.copy(new THREE.Matrix4().makeTranslation(off.x, off.y, 0).multiply(o.localMatrix));
     o.mesh.matrixWorldNeedsUpdate = true;
     this.refreshColors();
     if (!this.drag?.rotate) this.#placeGizmo();
@@ -354,8 +427,22 @@ export class Viewer extends EventTarget {
     return box;
   }
 
+  /** Bounds of a model on its own plate, in printer coordinates. */
+  bedBox(id) {
+    // Worked out from the model's own placement, so it is right even before the view catches up.
+    const o = this.objects.get(id);
+    if (!o) return null;
+    const m = o.localMatrix || instanceMatrix(o.item, o.mesh.geometry);
+    const pos = o.mesh.geometry.attributes.position;
+    const box = new THREE.Box3();
+    const v = new THREE.Vector3();
+    const stride = pos.count > 200000 ? Math.ceil(pos.count / 200000) : 1;
+    for (let i = 0; i < pos.count; i += stride) box.expandByPoint(v.fromBufferAttribute(pos, i).applyMatrix4(m));
+    return box;
+  }
+
   isInside(id) {
-    const b = this.worldBox(id);
+    const b = this.bedBox(id);
     if (!b) return true;
     const eps = 0.01;
     const { x0, y0, width: W, depth: D, height: H, shape } = this.bed;
@@ -683,13 +770,41 @@ export class Viewer extends EventTarget {
       if (this.drag) {
         const moved = this.drag.moved;
         const id = this.drag.id;
+        // Dropped on another plate: the model moves to that plate.
+        const o = moved && this.objects.get(id);
+        if (o) {
+          const b = this.worldBox(id);
+          const target = this.plateAt((b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2);
+          if (target && target !== o.item.plateId) {
+            const from = this.plateOffset(o.item.plateId), to = this.plateOffset(target);
+            o.item.x += from.x - to.x;
+            o.item.y += from.y - to.y;
+            const fromPlate = o.item.plateId;
+            o.item.plateId = target;
+            this.updateObject(o.item);
+            this.drag = null;
+            this.controls.enabled = true;
+            try { el.releasePointerCapture(event.pointerId); } catch { /* already released */ }
+            this.dispatchEvent(new CustomEvent('move', { detail: { id, live: false, fromPlate } }));
+            downAt = null;
+            return;
+          }
+        }
         try { el.releasePointerCapture(this.drag.pointerId); } catch { /* already released */ }
         this.drag = null;
         this.controls.enabled = true;
         if (moved) this.dispatchEvent(new CustomEvent('move', { detail: { id, live: false } }));
       } else if (downAt && this.mode === 'prepare') {
-        // A click on empty space (not an orbit drag) clears the selection.
-        if (Math.hypot(event.clientX - downAt.x, event.clientY - downAt.y) < 4) this.select(null);
+        // A click on empty space (not an orbit drag) clears the selection;
+        // a click on another plate makes it the active plate.
+        if (Math.hypot(event.clientX - downAt.x, event.clientY - downAt.y) < 4) {
+          this.select(null);
+          this.#pick(event);
+          const hit = this.raycaster.intersectObjects(this.bedGroup.children, true).find((h) => h.object.userData.plateId);
+          if (hit && hit.object.userData.plateId !== this.activePlate) {
+            this.dispatchEvent(new CustomEvent('plate', { detail: { id: hit.object.userData.plateId } }));
+          }
+        }
       }
       downAt = null;
     };
@@ -715,6 +830,7 @@ export class Viewer extends EventTarget {
   setPreview(data, lineWidth = 0.45) {
     this.clearPreview();
     this.previewData = data;
+    this.previewGroup.position.copy(this.plateOffset(this.activePlate));
     this.previewLineWidth = lineWidth;
     this.hiddenFeatures = new Set();
     this.previewMode = 'feature';
@@ -799,6 +915,11 @@ export class Viewer extends EventTarget {
   /** Point the camera at a box ([minX, minY, minZ, maxX, maxY, maxZ]) so it fills the view. */
   frame(b) {
     if (!b) return;
+    if (this.previewData && b === this.previewData.bounds) {
+      // Sliced G-code is in printer coordinates of the plate it was drawn on.
+      const p = this.previewGroup.position;
+      b = [b[0] + p.x, b[1] + p.y, b[2], b[3] + p.x, b[4] + p.y, b[5]];
+    }
     const center = new THREE.Vector3((b[0] + b[3]) / 2, (b[1] + b[4]) / 2, (b[2] + b[5]) / 2);
     const radius = Math.max(5, 0.5 * Math.hypot(b[3] - b[0], b[4] - b[1], b[5] - b[2]));
     const vfov = THREE.MathUtils.degToRad(this.camera.fov);
@@ -815,10 +936,30 @@ export class Viewer extends EventTarget {
     this.cameraTouched = true;
   }
 
+  /** Show every plate. */
+  framePlates() {
+    const ids = this.plateIds.length ? this.plateIds : [this.activePlate];
+    const box = new THREE.Box3();
+    for (const id of ids) {
+      const off = this.plateOffset(id);
+      box.expandByPoint(new THREE.Vector3(this.bed.x0 + off.x, this.bed.y0 + off.y, 0));
+      box.expandByPoint(new THREE.Vector3(this.bed.x0 + off.x + this.bed.width, this.bed.y0 + off.y + this.bed.depth, Math.min(this.bed.height, 60)));
+    }
+    this.frame([box.min.x, box.min.y, box.min.z, box.max.x, box.max.y, box.max.z]);
+  }
+
   /** Frame the models on the active plate, or the whole bed when there are none. */
   frameModels() {
     const box = new THREE.Box3();
     for (const [id, o] of this.objects) if (o.mesh.visible) box.union(this.worldBox(id));
+    if (box.isEmpty() && this.plateIds.length > 1) {
+      // No models yet: show all the plates.
+      for (const id of this.plateIds) {
+        const off = this.plateOffset(id);
+        box.expandByPoint(new THREE.Vector3(this.bed.x0 + off.x, this.bed.y0 + off.y, 0));
+        box.expandByPoint(new THREE.Vector3(this.bed.x0 + off.x + this.bed.width, this.bed.y0 + off.y + this.bed.depth, 0));
+      }
+    }
     if (box.isEmpty()) { this.resetCamera(); return; }
     this.frame([box.min.x, box.min.y, box.min.z, box.max.x, box.max.y, box.max.z]);
   }

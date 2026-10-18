@@ -160,6 +160,10 @@ Hover over the pill to see the full error message.
 - **Limits:** painted seams and per-model setting modifiers aren't available. Adding a .3mf
   with **Add model** brings in just its models. Use **Open project…** to also
   load its plates and settings.
+- **Plates:** every plate is shown side by side in Prepare, numbered, with
+  the active plate outlined in orange. Click a plate (or a model on it) to
+  work on it, or drag a model from one plate onto another. **Fit** with no
+  models shows all plates.
 - **Undo / redo (↶ ↷ or Ctrl+Z / Ctrl+Y):** covers everything on the plates:
   adding, moving, turning, scaling and deleting models, Arrange, plates,
   colour choices, support boxes and paint (up to 60 steps). Print settings and
