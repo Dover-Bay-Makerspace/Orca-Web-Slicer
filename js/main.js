@@ -33,7 +33,7 @@ const ui = Object.fromEntries([
   'rTime', 'rFilament', 'downloadBtn', 'downloadAllBtn', 'rNote', 'message', 'tabPrepare', 'tabPreview', 'prepareTools',
   'addBtn', 'modelFile', 'arrangeBtn', 'orientBtn', 'rotX', 'rotY', 'rotZ', 'rotateTool', 'layFlatTool', 'paintTool', 'paintBar', 'paintColours', 'paintErase',
   'paintBrushMode', 'paintFillMode', 'paintSize', 'paintSizeText', 'paintAngle', 'paintAngleText', 'paintSizeRow',
-  'paintAngleRow', 'paintUndo', 'paintClear', 'paintHint', 'rotXDeg', 'rotYDeg', 'rotZDeg', 'rotReset', 'scaleInput', 'dupBtn', 'delBtn', 'viewport',
+  'paintAngleRow', 'paintUndo', 'paintRedo', 'paintClear', 'paintHint', 'undoBtn', 'redoBtn', 'rotXDeg', 'rotYDeg', 'rotZDeg', 'rotReset', 'scaleInput', 'dupBtn', 'delBtn', 'viewport',
   'dropHint', 'layerControls', 'layerSlider', 'layerLabel', 'legend', 'objectBar', 'objectList', 'selectionInfo',
   'fitBtn', 'plateBar', 'plateList', 'addPlateBtn', 'delPlateBtn', 'objPanel', 'objName', 'objPlate', 'addEnforcer', 'addBlocker',
   'partSection', 'partList', 'modList', 'modEdit', 'modTitle', 'modX', 'modY', 'modZ', 'modW', 'modD', 'modH', 'modDelete',
@@ -126,7 +126,7 @@ function withBusy(fn) {
   return async (...args) => {
     state.busy++;
     updateButtons();
-    try { return await fn(...args); } finally { state.busy--; updateButtons(); }
+    try { return await fn(...args); } finally { state.busy--; updateButtons(); if (!state.busy) recordHistory(); }
   };
 }
 
@@ -1334,6 +1334,7 @@ function selectedModifier() {
 }
 
 function objectsChanged() {
+  recordHistory();
   renderPaintBar();
   const onPlate = objectsOn(state.activePlate);
   ui.dropHint.hidden = viewer.mode !== 'prepare' || state.objects.length > 0;
@@ -1420,7 +1421,7 @@ function setTool(tool) {
 
 // ------------------------------------------------------------- painting --
 
-const paintTool = { filament: 2, mode: 'brush', erase: false, size: 2, angle: 30, undo: [], stroke: null, pending: null };
+const paintTool = { filament: 2, mode: 'brush', erase: false, size: 2, angle: 30, stroke: null, pending: null };
 
 function painterFor(item) {
   if (!item.paint) item.paint = new Map();
@@ -1456,7 +1457,8 @@ function renderPaintBar() {
   ui.paintAngleRow.hidden = paintTool.mode !== 'fill';
   ui.paintSizeText.textContent = `${paintTool.size} mm`;
   ui.paintAngleText.textContent = `${paintTool.angle}°`;
-  ui.paintUndo.disabled = !paintTool.undo.length;
+  ui.paintUndo.disabled = !history.undo.length;
+  ui.paintRedo.disabled = !history.redo.length;
   const hints = [];
   if (state.slots.length < 2) {
     hints.push(maxSlots() < 2
@@ -1479,8 +1481,7 @@ function applyPaint(detail) {
   if (detail.phase === 'end') {
     paintTool.stroke = null;
     if (stroke.changed.size) {
-      paintTool.undo.push(stroke);
-      if (paintTool.undo.length > 30) paintTool.undo.shift();
+      item.paintRev = (item.paintRev || 0) + 1;
       item.paintStates = null;
       invalidatePlate(item.plateId);
       objectsChanged();
@@ -1501,23 +1502,11 @@ function applyPaint(detail) {
   }
 }
 
-function undoPaint() {
-  const last = paintTool.undo.pop();
-  if (!last) return;
-  painterFor(last.item).restore(last.changed);
-  last.item.paintStates = null;
-  viewer.repaint(last.item);
-  invalidatePlate(last.item.plateId);
-  objectsChanged();
-  renderPaintBar();
-}
-
 function clearPaint() {
   const item = selected();
   if (!item?.paint?.size) return;
-  const changed = new Map(item.paint);
-  painterFor(item).restore(new Map([...changed.keys()].map((k) => [k, undefined])));
-  paintTool.undo.push({ item, changed });
+  painterFor(item).restore(new Map([...item.paint.keys()].map((k) => [k, undefined])));
+  item.paintRev = (item.paintRev || 0) + 1;
   item.paintStates = null;
   viewer.repaint(item);
   invalidatePlate(item.plateId);
@@ -1641,6 +1630,7 @@ function editModifier() {
   viewer.updateModifier(item, mod);
   invalidatePlate(item.plateId);
   renderObjectPanel();
+  recordHistory();
 }
 
 function deleteModifier() {
@@ -2122,6 +2112,8 @@ function updateButtons() {
   const sel = !!selected();
   const busy = state.busy > 0 || !!state.slicing;
   const ready = state.engineReady && !!state.machine;
+  ui.undoBtn.disabled = !history.undo.length || busy;
+  ui.redoBtn.disabled = !history.redo.length || busy;
   ui.sliceBtn.disabled = !ready || !onPlate || busy;
   ui.sliceBtn.textContent = !state.engineReady && !state.engineError ? 'Waiting for engine…'
     : state.plates.length > 1 ? `Slice ${plateLabel(state.plates.find((p) => p.id === state.activePlate) || state.plates[0])}` : 'Slice plate';
@@ -2157,6 +2149,102 @@ function resetPlates() {
   setTab('prepare');
   renderPlates();
   renderResult();
+}
+
+// ------------------------------------------------------------ undo/redo --
+//
+// The Prepare view (models, their placement, colours, paint, support boxes and
+// plates) is snapshotted after each change. Mesh data is shared, never copied:
+// it doesn't change once loaded. Settings and filaments have their own resets.
+
+const history = { undo: [], redo: [], last: null, lastSig: '', restoring: false, limit: 60 };
+
+function snapItem(it) {
+  return {
+    ...it,
+    quaternion: it.quaternion.clone(),
+    scale: [...it.scale],
+    parts: it.parts ? it.parts.map((p) => ({ ...p })) : null,
+    paint: it.paint ? new Map(it.paint) : null,
+    painter: null,
+    paintStates: null,
+    modifiers: it.modifiers.map((m) => ({ ...m, matrix: m.matrix.clone() })),
+  };
+}
+
+function snapshot() {
+  return {
+    items: state.objects.map(snapItem),
+    plates: state.plates.map((p) => ({ ...p })),
+    activePlate: state.activePlate,
+    selected: viewer.selectedId,
+  };
+}
+
+function signature() {
+  const f = (v) => (Math.round(v * 1e4) / 1e4).toString();
+  return state.plates.map((p) => p.id + ':' + p.name).join(',') + '#' + state.objects.map((o) => [
+    o.id, o.plateId, f(o.x), f(o.y), o.quaternion.toArray().map(f).join(' '), o.scale.map(f).join(' '), o.filament,
+    o.parts ? o.parts.map((p) => p.filament).join('+') : '', o.paintRev || 0,
+    o.modifiers.map((m) => m.id + m.role + m.matrix.elements.map(f).join(' ')).join(';'),
+  ].join('|')).join('/');
+}
+
+/** Called after changes: if the scene differs from the last snapshot, that snapshot becomes an undo step. */
+function recordHistory() {
+  if (history.restoring || state.busy > 0) return;
+  const sig = signature();
+  if (sig === history.lastSig) return;
+  if (history.last) {
+    history.undo.push(history.last);
+    if (history.undo.length > history.limit) history.undo.shift();
+    history.redo = [];
+  }
+  history.last = snapshot();
+  history.lastSig = sig;
+  updateButtons();
+}
+
+function restoreSnapshot(snap) {
+  history.restoring = true;
+  try {
+    viewer.select(null);
+    for (const it of state.objects) viewer.removeObject(it.id);
+    const n = state.slots.length;
+    state.objects = snap.items.map(snapItem);
+    for (const it of state.objects) {
+      if (it.filament > n) it.filament = 1;
+      for (const p of it.parts || []) if (p.filament > n) p.filament = 1;
+    }
+    state.plates = snap.plates.map((p) => ({ ...p }));
+    for (const id of [...state.results.keys()]) if (!state.plates.some((p) => p.id === id)) state.results.delete(id);
+    for (const it of state.objects) viewer.addObject(it);
+    invalidateAll();
+    setActivePlate(state.plates.some((p) => p.id === snap.activePlate) ? snap.activePlate : state.plates[0].id);
+    if (snap.selected && state.objects.some((o) => o.id === snap.selected && o.plateId === state.activePlate)) viewer.select(snap.selected);
+  } finally {
+    history.restoring = false;
+  }
+  history.last = snapshot();
+  history.lastSig = signature();
+  objectsChanged();
+  updateButtons();
+}
+
+function undo() {
+  if (!history.undo.length || state.busy || state.slicing) return;
+  if (viewer.mode !== 'prepare') setTab('prepare');
+  history.redo.push(history.last);
+  restoreSnapshot(history.undo.pop());
+  showMessage('');
+}
+
+function redo() {
+  if (!history.redo.length || state.busy || state.slicing) return;
+  if (viewer.mode !== 'prepare') setTab('prepare');
+  history.undo.push(history.last);
+  restoreSnapshot(history.redo.pop());
+  showMessage('');
 }
 
 function newProject() {
@@ -2339,7 +2427,10 @@ ui.paintBrushMode.onclick = () => { paintTool.mode = 'brush'; renderPaintBar(); 
 ui.paintFillMode.onclick = () => { paintTool.mode = 'fill'; renderPaintBar(); };
 ui.paintSize.oninput = () => { paintTool.size = +ui.paintSize.value; viewer.brushRadius = paintTool.size; renderPaintBar(); };
 ui.paintAngle.oninput = () => { paintTool.angle = +ui.paintAngle.value; renderPaintBar(); };
-ui.paintUndo.onclick = undoPaint;
+ui.paintUndo.onclick = undo;
+ui.paintRedo.onclick = redo;
+ui.undoBtn.onclick = undo;
+ui.redoBtn.onclick = redo;
 ui.paintClear.onclick = clearPaint;
 ui.rotateTool.onclick = () => setTool('rotate');
 ui.layFlatTool.onclick = () => setTool('layflat');
@@ -2432,7 +2523,8 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && editor?.isOpen) { editor.close(); return; }
   if (e.target.closest('input, select, textarea') || viewer.mode !== 'prepare') return;
   if (e.key === 'Delete' || e.key === 'Backspace') { deleteSelected(); e.preventDefault(); }
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && viewer.tool === 'paint') { undoPaint(); e.preventDefault(); return; }
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { redo(); e.preventDefault(); return; }
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'z') { undo(); e.preventDefault(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (viewer.tool === 'paint' && /^[1-9]$/.test(e.key) && +e.key <= state.slots.length) {
     paintTool.filament = +e.key; paintTool.erase = false; renderPaintBar(); return;

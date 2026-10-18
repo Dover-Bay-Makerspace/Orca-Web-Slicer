@@ -124,6 +124,9 @@
         <div class="tools" id="prepareTools">
           <button id="addBtn" type="button" class="primary">Add model</button>
           <input id="modelFile" type="file" multiple hidden>
+          <button id="undoBtn" type="button" class="icon" title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
+          <button id="redoBtn" type="button" class="icon" title="Redo (Ctrl+Y)" aria-label="Redo">↷</button>
+          <span class="sep"></span>
           <button id="arrangeBtn" type="button" title="Arrange the models on this plate">Arrange</button>
           <button id="orientBtn" type="button" title="Let OrcaSlicer pick the best orientation for every model on this plate">Auto-orient</button>
           <span class="sep"></span>
@@ -161,7 +164,8 @@
             </div>
             <label class="paint-size" id="paintSizeRow">Size <input id="paintSize" type="range" min="0.5" max="15" step="0.5" value="2" aria-label="Brush size (mm)"><span id="paintSizeText">2 mm</span></label>
             <label class="paint-size" id="paintAngleRow" hidden>Edge angle <input id="paintAngle" type="range" min="1" max="90" step="1" value="30" aria-label="Fill stops at edges sharper than this"><span id="paintAngleText">30°</span></label>
-            <button id="paintUndo" type="button" class="link" title="Undo the last stroke (Ctrl+Z)">Undo</button>
+            <button id="paintUndo" type="button" class="link" title="Undo (Ctrl+Z)">Undo</button>
+            <button id="paintRedo" type="button" class="link" title="Redo (Ctrl+Y)">Redo</button>
             <button id="paintClear" type="button" class="link" title="Remove all paint from the selected model">Clear</button>
           </div>
           <p id="paintHint" class="hint"></p>

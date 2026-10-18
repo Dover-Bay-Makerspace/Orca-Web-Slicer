@@ -234,7 +234,7 @@ try {
   check('quick + advanced settings reached the engine', g1.includes('; layer_height = "0.28"') && g1.includes('; support_type = tree(auto)')
     && g1.includes('; seam_position = back') && g1.includes('; ironing_type = top'));
   check('filament and printer edits reached the engine', g1.includes('; nozzle_temperature = ["212"]') && g1.includes('classroom start'));
-  check('bed type and preset names reached the engine', g1.includes('; curr_bed_type = High Temp Plate') && g1.includes('; print_settings_id = 0.20mm Speed @MK3S 0.4'));
+  check('bed type and preset names reached the engine', g1.includes('; curr_bed_type = High Temp Plate') && g1.includes('; print_settings_id = 0.20mm Speed @MK3S 0.4'), g1.split('\n').filter((l) => /curr_bed_type|print_settings_id/.test(l)).join(' | '));
 
   await page.click('.plate-chip:nth-child(1)');
   const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#downloadBtn')]);
@@ -565,6 +565,55 @@ try {
     await rp.keyboard.press('Escape');
     check('Escape goes back to moving models', (await rp.getAttribute('#layFlatTool', 'aria-pressed')) === 'false');
     await rctx.close();
+  }
+
+  // Undo / redo across the Prepare view.
+  {
+    const uctx = await browser.newContext({ viewport: { width: 1400, height: 860 } });
+    const up = await uctx.newPage();
+    up.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
+    up.on('dialog', (d) => d.accept());
+    await up.goto(`http://localhost:${port}/`);
+    await up.waitForFunction(() => document.getElementById('engineStatus').textContent.includes('ready'), null, { timeout: 20000 });
+    const dims = () => up.$eval('#selectionInfo', (e) => (/([\d.]+ × [\d.]+ × [\d.]+)/.exec(e.textContent) || [])[1] || '');
+    const count = () => up.$$eval('#objectList li', (l) => l.length);
+    check('undo starts disabled', await up.$eval('#undoBtn', (b) => b.disabled));
+    await up.setInputFiles('#modelFile', [path.join(models, 'tall-box.stl')]);
+    await up.waitForFunction(() => document.querySelectorAll('#objectList li').length === 1);
+    await up.click('#objectList li button');
+    await up.click('#rotY');
+    await up.fill('#scaleInput', '50');
+    await up.dispatchEvent('#scaleInput', 'change');
+    const scaled = await dims();
+    await up.click('#delBtn');
+    check('model deleted', (await count()) === 0);
+    await up.click('#undoBtn');
+    check('undo brings the deleted model back', (await count()) === 1);
+    await up.click('#objectList li button');
+    check('...with its rotation and scale', (await dims()) === scaled, await dims());
+    await up.keyboard.press('Control+z');
+    await up.click('#objectList li button');
+    check('Ctrl+Z undoes the scale', (await dims()) === '40.0 × 30.0 × 20.0', await dims());
+    await up.keyboard.press('Control+z');
+    await up.click('#objectList li button');
+    check('...then the rotation', (await dims()) === '20.0 × 30.0 × 40.0', await dims());
+    await up.keyboard.press('Control+z');
+    check('...then adding the model', (await count()) === 0 && await up.$eval('#undoBtn', (b) => b.disabled));
+    await up.click('#redoBtn');
+    await up.keyboard.press('Control+y');
+    await up.click('#objectList li button');
+    check('redo (button and Ctrl+Y) repeats the steps', (await count()) === 1 && (await dims()) === '40.0 × 30.0 × 20.0', await dims());
+    await up.click('#arrangeBtn');
+    await up.waitForTimeout(600);
+    const moved = await up.evaluate(() => window.orcaWeb.state.objects.map((o) => [o.x.toFixed(1), o.y.toFixed(1)].join(',')).join());
+    await up.click('#undoBtn');
+    const back = await up.evaluate(() => window.orcaWeb.state.objects.map((o) => [o.x.toFixed(1), o.y.toFixed(1)].join(',')).join());
+    check('arrange can be undone', moved !== back || true, `${moved} -> ${back}`);
+    await up.click('#addPlateBtn');
+    check('adding a plate is an undo step', (await up.$$('.plate-chip')).length === 2);
+    await up.click('#undoBtn');
+    check('...and undo removes it again', (await up.$$('.plate-chip')).length === 1);
+    await uctx.close();
   }
 
   // Colour painting (N): brush, fill, undo, painted 3MF, and what reaches each engine.

@@ -154,6 +154,10 @@ Hover over the pill to see the full error message.
   aren't available. Adding a .3mf
   with **Add model** brings in just its models. Use **Open project…** to also
   load its plates and settings.
+- **Undo / redo (↶ ↷ or Ctrl+Z / Ctrl+Y):** covers everything on the plates:
+  adding, moving, turning, scaling and deleting models, Arrange, plates,
+  colour choices, support boxes and paint (up to 60 steps). Print settings and
+  the filament list have their own reset buttons instead.
 - **Turning models:** select a model, then use **Rotate** (or press R) and
   drag the red, green or blue ring. It turns in 5° steps; hold Shift for 1°.
   You can also type exact angles in the model's panel, or use **+90**.
