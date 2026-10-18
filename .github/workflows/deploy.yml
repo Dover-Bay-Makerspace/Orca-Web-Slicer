@@ -16,6 +16,10 @@ name: Deploy site
 # point for home-built printers. Your own printer files go in custom-printers/.
 env:
   PRINTER_BRANDS: "Bambu, Snapmaker, Prusa, Custom"
+  # Where the slicing engine comes from. "Hiosdra/OrcaWeb" is the standard
+  # engine. After your own engine copy (with colour painting) has finished
+  # building, change this to "Dover-Bay-Makerspace/OrcaWeb" and commit.
+  ENGINE_REPO: "Hiosdra/OrcaWeb"
 
 on:
   push:
@@ -50,6 +54,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ENGINE_TAG: ${{ github.event.inputs.engine_tag }}
+          ENGINE_REPO: ${{ env.ENGINE_REPO }}
         run: bash tools/fetch-engine.sh
 
       - name: Get OrcaSlicer profiles and settings list matching the engine
