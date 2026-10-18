@@ -8,6 +8,8 @@ const COLORS = {
   model: 0x4f9dde,
   selected: 0xf2a33a,
   outside: 0xd9534f,
+  'support-enforcer': 0x2fbf5a,
+  'support-blocker': 0xe0453a,
 };
 
 export class Viewer extends EventTarget {
@@ -39,6 +41,8 @@ export class Viewer extends EventTarget {
 
     this.objects = new Map(); // id -> { mesh, item }
     this.selectedId = null;
+    this.selectedModifierId = null;
+    this.activePlate = null;
     this.mode = 'prepare';
     this.bed = { width: 256, depth: 256, height: 250, shape: 'rectangle' };
 
@@ -152,8 +156,66 @@ export class Viewer extends EventTarget {
     mesh.userData.id = item.id;
     mesh.matrixAutoUpdate = false;
     this.modelGroup.add(mesh);
-    this.objects.set(item.id, { mesh, item });
+    this.objects.set(item.id, { mesh, item, modifiers: new Map() });
+    for (const m of item.modifiers || []) this.addModifier(item, m);
     this.updateObject(item);
+    this.applyPlateVisibility();
+  }
+
+  /** A support enforcer/blocker volume, drawn translucent and attached to its model. */
+  addModifier(item, modifier) {
+    const o = this.objects.get(item.id);
+    if (!o) return;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(modifier.positions, 3));
+    geo.computeVertexNormals();
+    geo.computeBoundingBox();
+    const mat = new THREE.MeshStandardMaterial({
+      color: COLORS[modifier.role], transparent: true, opacity: 0.38, depthWrite: false, depthTest: false,
+      roughness: 0.6, side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.matrixAutoUpdate = false;
+    mesh.matrix.copy(modifier.matrix);
+    mesh.renderOrder = 2;
+    mesh.userData.id = item.id;
+    mesh.userData.modifierId = modifier.id;
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 30),
+      new THREE.LineBasicMaterial({ color: COLORS[modifier.role], transparent: true, opacity: 0.9, depthTest: false }));
+    edges.renderOrder = 3;
+    edges.raycast = () => {};
+    mesh.add(edges);
+    o.mesh.add(mesh);
+    o.modifiers.set(modifier.id, mesh);
+  }
+
+  updateModifier(item, modifier) {
+    const mesh = this.objects.get(item.id)?.modifiers.get(modifier.id);
+    if (!mesh) return;
+    mesh.matrix.copy(modifier.matrix);
+    mesh.matrixWorldNeedsUpdate = true;
+  }
+
+  removeModifier(item, modifierId) {
+    const o = this.objects.get(item.id);
+    const mesh = o?.modifiers.get(modifierId);
+    if (!mesh) return;
+    o.mesh.remove(mesh);
+    mesh.geometry.dispose();
+    mesh.material.dispose();
+    o.modifiers.delete(modifierId);
+    if (this.selectedModifierId === modifierId) this.selectedModifierId = null;
+    this.refreshColors();
+  }
+
+  /** Only the models on the active plate are shown. */
+  setActivePlate(plateId) {
+    this.activePlate = plateId;
+    this.applyPlateVisibility();
+  }
+
+  applyPlateVisibility() {
+    for (const o of this.objects.values()) o.mesh.visible = !this.activePlate || o.item.plateId === this.activePlate;
   }
 
   removeObject(id) {
@@ -175,11 +237,17 @@ export class Viewer extends EventTarget {
     this.refreshColors();
   }
 
+  /** World-space bounds of a model itself (support boxes are not part of it). */
   worldBox(id) {
     const o = this.objects.get(id);
     if (!o) return null;
     o.mesh.updateMatrixWorld(true);
-    return new THREE.Box3().setFromObject(o.mesh, true);
+    const pos = o.mesh.geometry.attributes.position;
+    const box = new THREE.Box3();
+    const v = new THREE.Vector3();
+    const stride = pos.count > 200000 ? Math.ceil(pos.count / 200000) : 1;
+    for (let i = 0; i < pos.count; i += stride) box.expandByPoint(v.fromBufferAttribute(pos, i).applyMatrix4(o.mesh.matrixWorld));
+    return box;
   }
 
   isInside(id) {
@@ -200,13 +268,19 @@ export class Viewer extends EventTarget {
     for (const [id, o] of this.objects) {
       const color = !this.isInside(id) ? COLORS.outside : id === this.selectedId ? COLORS.selected : COLORS.model;
       o.mesh.material.color.setHex(color);
+      for (const [mid, m] of o.modifiers) {
+        const on = mid === this.selectedModifierId;
+        m.material.opacity = on ? 0.6 : 0.32;
+        m.children[0].material.color.setHex(on ? 0xffffff : m.material.color.getHex());
+      }
     }
   }
 
-  select(id) {
+  select(id, modifierId = null) {
     this.selectedId = id;
+    this.selectedModifierId = id ? modifierId : null;
     this.refreshColors();
-    this.dispatchEvent(new CustomEvent('select', { detail: { id } }));
+    this.dispatchEvent(new CustomEvent('select', { detail: { id, modifierId: this.selectedModifierId } }));
   }
 
   // ------------------------------------------------------- pointer ----
@@ -229,11 +303,15 @@ export class Viewer extends EventTarget {
     el.addEventListener('pointerdown', (event) => {
       if (event.button !== 0 || this.mode !== 'prepare') return;
       this.#pick(event);
-      const hits = this.raycaster.intersectObjects(this.modelGroup.children, false);
+      const visible = this.modelGroup.children.filter((m) => m.visible);
+      const hits = this.raycaster.intersectObjects(visible, true).filter((h) => h.object.userData.id);
       downAt = { x: event.clientX, y: event.clientY };
       if (hits.length) {
-        const id = hits[0].object.userData.id;
-        if (id !== this.selectedId) this.select(id);
+        // Prefer a support box when the click passes through one.
+        const hit = hits.find((h) => h.object.userData.modifierId) || hits[0];
+        const id = hit.object.userData.id;
+        const modifierId = hit.object.userData.modifierId || null;
+        if (id !== this.selectedId || modifierId !== this.selectedModifierId) this.select(id, modifierId);
         const start = this.#bedPoint();
         const item = this.objects.get(id).item;
         if (start) {

@@ -20,7 +20,7 @@ async function fetchJson(rel) {
 export const loadIndex = () => fetchJson('index.json');
 export const loadLibrary = () => fetchJson('library.json');
 export const loadVendor = (indexFile) => fetchJson(indexFile);
-const loadNames = () => fetchJson('names.json');
+export const loadNames = () => fetchJson('names.json');
 
 /** Merged settings for a published preset file. */
 export async function resolveFile(rel, depth = 0) {

@@ -16,8 +16,21 @@ themselves (SD card, USB stick, or the printer's own web page).
 - **File types:** STL, 3MF (geometry), OBJ and STEP.
 - **Plate tools:** move by dragging, rotate 90°, scale, copy, delete,
   OrcaSlicer's **Arrange** and **Auto-orient**.
+- **Multiple plates:** add plates, move models between them, slice one plate
+  or all of them, and download each plate's G-code or all of them as a .zip.
+- **Support enforcers and blockers:** select a model and add boxes that force
+  supports, or keep them out, in that area. Set each box's position and size
+  in millimetres.
 - **Quick settings:** layer height, infill, walls, supports (off/normal/tree),
   brim and build-plate type.
+- **Advanced settings:** all of OrcaSlicer's Print, Filament and Printer
+  settings, with the same pages, names and help text as the desktop app, plus
+  search. Changed settings are shown in bold and can be reset one at a time.
+  Expert-level settings are hidden unless you tick "Show expert settings".
+- **Projects:** **Save project** writes an OrcaSlicer project (.3mf) with every
+  plate, support box and setting. **Open project…** reopens it here, and the
+  file also opens in desktop OrcaSlicer. Projects made in desktop OrcaSlicer or
+  Bambu Studio open here too.
 - **Custom presets:** you can import printer, process or filament presets
   exported from desktop OrcaSlicer (`.json`).
 - **Preview:** layer-by-layer G-code preview, plus print time and filament
@@ -107,9 +120,14 @@ Hover over the pill to see the full error message.
 - **What stays on student PCs:** only normal browser data. That is the cached
   engine (about 30 MB, so later visits load fast), the student's last-used
   printer and settings, and any G-code files they download.
-- **Limits:** each slice is one plate with one filament. Multi-material,
-  painted supports and modifiers aren't in this interface. A 3MF file loads
-  as geometry only; its embedded print settings aren't used.
+- **Limits:** one filament per print. Multi-material, painted supports or
+  seams, and per-model setting modifiers aren't available; when a desktop
+  project contains them, they are skipped and the page says so. Adding a .3mf
+  with **Add model** brings in just its models. Use **Open project…** to also
+  load its plates and settings.
+- **Settings:** changes in Advanced settings are remembered in that browser.
+  Picking a different printer, filament or print profile clears the changes
+  for that part only, like switching presets in the desktop app.
 - **Custom printer settings:** in desktop OrcaSlicer, export your tuned
   printer, filament or process preset as `.json`, then use **Import OrcaSlicer
   preset…** on the site. Imported presets are remembered in that browser only,
@@ -140,6 +158,7 @@ vendor/                     three.js (3D view)
 coi-serviceworker.min.js    supplies the required headers on GitHub Pages
 tools/fetch-engine.sh/.ps1  download the engine
 tools/build-profiles.py     build profiles/ from an OrcaSlicer checkout
+tools/build-settings-schema.py  build settings-schema.json (Advanced settings) from OrcaSlicer's source
 tools/serve.py              local test server with the right headers
 .github/workflows/deploy.yml  GitHub Pages build and publish
 tests/                      headless browser test with a stand-in engine
@@ -159,7 +178,10 @@ To run it locally:
 1. Download the engine with `tools\fetch-engine.ps1` or `tools/fetch-engine.sh`.
 2. Build the profile library with
    `python3 tools/build-profiles.py --orca <OrcaSlicer checkout> --out profiles`.
-   The checkout only needs `resources/profiles`.
+   Then build the Advanced settings list with
+   `python3 tools/build-settings-schema.py --orca <OrcaSlicer checkout> --out settings-schema.json`.
+   The checkout only needs `resources/profiles`, `src/libslic3r/PrintConfig.cpp`
+   and `src/slic3r/GUI/Tab.cpp`.
 3. Run `python tools/serve.py` and open http://localhost:8080.
 
 For Cloudflare Pages or Netlify, the included `_headers` file sets the

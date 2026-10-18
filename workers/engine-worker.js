@@ -150,7 +150,7 @@ const handlers = {
     }
   },
 
-  async slice({ id, layers, blob, manifest, plateId }) {
+  async slice({ id, layers, blob, manifest, plateIds }) {
     const engine = await loadEngine();
     const { session, skipped } = await configuredSession(engine, layers);
     const controller = new AbortController();
@@ -160,23 +160,43 @@ const handlers = {
       const result = await session.slice({
         schemaVersion: manifest.schemaVersion,
         plateSelection: 'selected',
-        plateIds: [plateId],
+        plateIds,
         includeGcode: true,
         includeStatistics: true,
       }, {
         signal: controller.signal,
         onProgress: (p) => post({ type: 'progress', id, percent: p.percent, stage: p.stage }),
       });
-      const plate = (result.plateResults || [])[0];
-      const asset = plate && (plate.assets || []).find((a) => a.kind === 'gcode');
-      if (!asset) throw Object.assign(new Error('The engine finished but returned no G-code.'), { code: 'NO_DATA' });
-      const gcode = await session.getAsset(asset.id);
-      return {
-        transfer: [gcode.buffer],
-        value: { gcode: gcode.buffer, statistics: plate.statistics || null, skipped },
-      };
+      const plates = [];
+      const transfer = [];
+      for (const plate of result.plateResults || []) {
+        const asset = (plate.assets || []).find((a) => a.kind === 'gcode');
+        if (!asset) throw Object.assign(new Error('The engine finished but returned no G-code for ' + plate.plateId + '.'), { code: 'NO_DATA' });
+        const gcode = await session.getAsset(asset.id);
+        plates.push({ plateId: plate.plateId, gcode: gcode.buffer, statistics: plate.statistics || null });
+        transfer.push(gcode.buffer);
+      }
+      return { transfer, value: { plates, skipped } };
     } finally {
       abortControllers.delete(id);
+      await session.dispose();
+    }
+  },
+
+  async exportProject({ layers, blob, manifest }) {
+    const engine = await loadEngine();
+    const { session, skipped } = await configuredSession(engine, layers);
+    try {
+      await session.setObjects(new Uint8Array(blob), manifest);
+      const result = await session.export('project.3mf', {
+        schemaVersion: manifest.schemaVersion,
+        preservation: 'portable',
+        includeSliceArtifacts: false,
+      });
+      const assetId = (result && result.asset && result.asset.id) || 'project:export';
+      const bytes = await session.getAsset(assetId);
+      return { transfer: [bytes.buffer], value: { bytes: bytes.buffer, skipped } };
+    } finally {
       await session.dispose();
     }
   },

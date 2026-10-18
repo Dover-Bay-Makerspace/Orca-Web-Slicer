@@ -1,24 +1,37 @@
 import { Viewer, instanceMatrix, toRowMajor, fromRowMajor, THREE } from './viewer.js';
 import { EngineClient } from './engine-client.js';
-import { parseStl, normalise, toBinaryStl, fileKind, ACCEPTED_EXTENSIONS } from './meshes.js';
+import { parseStl, normalise, bounds, toBinaryStl, fileKind, ACCEPTED_EXTENSIONS } from './meshes.js';
 import {
-  loadIndex, loadLibrary, loadVendor, resolveFile, resolveUserPreset, normaliseType,
+  loadIndex, loadLibrary, loadVendor, loadNames, resolveFile, resolveUserPreset, normaliseType,
   first, bedFromMachine, extruderCount, filamentForSlots, BED_TYPES,
 } from './profiles.js';
+import { SettingsEditor, keyTabs } from './settings-editor.js';
+import { readProjectFile } from './project-io.js';
+import { makeZip } from './zip.js';
 
 const API_VERSION = '0.7.0';
-const PLATE_ID = 'plate-0';
-const STORE_KEY = 'orcaweb.settings.v1';
+const STORE_KEY = 'orcaweb.settings.v2';
+const METADATA_KEYS = new Set([
+  'name', 'inherits', 'from', 'instantiation', 'setting_id', 'type', 'version', 'description', 'is_custom_defined',
+  'compatible_printers', 'compatible_printers_condition', 'compatible_prints', 'compatible_prints_condition',
+  'print_settings_id', 'printer_settings_id', 'filament_settings_id', 'printer_model', 'printer_variant',
+  'different_settings_to_system', 'inherits_group', 'print_compatible_printers', 'upward_compatible_machine',
+  'renamed_from', 'base_id', 'user_id', 'updated_time', 'filament_ids', 'curr_bed_type', 'default_print_profile',
+  'default_filament_profile', 'filament_colour', 'flush_volumes_matrix', 'flush_volumes_vector', 'filament_map',
+  'printer_technology', 'gcode_flavor_list',
+]);
 
 const $ = (id) => document.getElementById(id);
 const ui = Object.fromEntries([
-  'engineStatus', 'aboutBtn', 'aboutDialog', 'aboutVersions', 'sourceLink',
+  'engineStatus', 'aboutBtn', 'aboutDialog', 'aboutVersions', 'sourceLink', 'newBtn', 'openBtn', 'saveBtn', 'projectFile',
   'vendorSelect', 'printerSelect', 'bedTypeSelect', 'bedInfo', 'filamentSelect', 'processSelect',
-  'qLayer', 'qInfill', 'qWalls', 'qSupport', 'qBrim', 'resetQuick', 'importPreset', 'presetFile',
-  'sliceBtn', 'progress', 'progressFill', 'progressText', 'cancelBtn', 'result', 'rTime', 'rFilament',
-  'downloadBtn', 'rNote', 'message', 'tabPrepare', 'tabPreview', 'prepareTools', 'addBtn', 'modelFile',
-  'arrangeBtn', 'orientBtn', 'rotX', 'rotY', 'rotZ', 'scaleInput', 'dupBtn', 'delBtn', 'viewport',
+  'qLayer', 'qInfill', 'qWalls', 'qSupport', 'qBrim', 'resetQuick', 'importPreset', 'presetFile', 'advBtn', 'advCount',
+  'advPanel', 'sliceBtn', 'sliceAllBtn', 'progress', 'progressFill', 'progressText', 'cancelBtn', 'result', 'rPlate',
+  'rTime', 'rFilament', 'downloadBtn', 'downloadAllBtn', 'rNote', 'message', 'tabPrepare', 'tabPreview', 'prepareTools',
+  'addBtn', 'modelFile', 'arrangeBtn', 'orientBtn', 'rotX', 'rotY', 'rotZ', 'scaleInput', 'dupBtn', 'delBtn', 'viewport',
   'dropHint', 'layerControls', 'layerSlider', 'layerLabel', 'legend', 'objectBar', 'objectList', 'selectionInfo',
+  'plateBar', 'plateList', 'addPlateBtn', 'delPlateBtn', 'objPanel', 'objName', 'objPlate', 'addEnforcer', 'addBlocker',
+  'modList', 'modEdit', 'modTitle', 'modX', 'modY', 'modZ', 'modW', 'modD', 'modH', 'modDelete',
 ].map((id) => [id, $(id)]));
 
 // ------------------------------------------------------------------ state --
@@ -30,18 +43,25 @@ const state = {
   library: null,
   vendor: null,          // vendor index
   printer: null,         // printer entry from vendor index
-  machine: null,         // resolved machine settings
-  process: null,         // resolved process settings
-  filament: null,        // resolved filament settings
+  machine: null,         // resolved machine preset
+  process: null,         // resolved process preset
+  filament: null,        // resolved filament preset
   processName: '',
   filamentName: '',
   userPresets: { machine: [], process: [], filament: [] },
+  overrides: {},         // setting key -> value, applied on top of the presets
+  schema: null,
+  keyTab: new Map(),
+  plates: [],            // [{ id, name }]
+  activePlate: null,
+  nextPlate: 1,
   objects: [],
-  nextObjectId: 1,
-  result: null,          // { gcode: Uint8Array, statistics, name }
-  stale: false,
+  nextId: 1,
+  results: new Map(),    // plateId -> { gcode, statistics, name, stale, skipped }
+  previewPlate: null,
   slicing: null,
   busy: 0,
+  projectName: '',
   saved: loadSaved(),
 };
 
@@ -55,7 +75,7 @@ function save() {
     bedType: ui.bedTypeSelect.value,
     process: ui.processSelect.value,
     filament: ui.filamentSelect.value,
-    quick: quickOverridesRaw(),
+    overrides: state.overrides,
     userPresets: state.userPresets,
   };
   try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch { /* storage unavailable: settings just aren't remembered */ }
@@ -75,11 +95,10 @@ function errorText(error) {
   return error.message || String(error);
 }
 
-function option(value, label, selected) {
+function option(value, label) {
   const o = document.createElement('option');
   o.value = value;
   o.textContent = label ?? value;
-  if (selected) o.selected = true;
   return o;
 }
 
@@ -93,12 +112,31 @@ function fmtTime(seconds) {
   return `${s}s`;
 }
 
+function same(a, b) {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+}
+
 function withBusy(fn) {
   return async (...args) => {
     state.busy++;
     updateButtons();
     try { return await fn(...args); } finally { state.busy--; updateButtons(); }
   };
+}
+
+function downloadBytes(bytes, name, type) {
+  const blob = new Blob([bytes], { type });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+}
+
+function safeName(text) {
+  return String(text || 'print').replace(/[^\w.+-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'print';
 }
 
 // ----------------------------------------------------------------- engine --
@@ -128,6 +166,74 @@ function setEngineStatus(kind, text, title = '') {
   ui.engineStatus.title = title;
 }
 
+// --------------------------------------------------------------- settings --
+
+/** Preset value of a setting (before the user's changes). */
+function baseValue(key) {
+  if (state.filament && key in state.filament) {
+    return filamentForSlots({ [key]: state.filament[key] }, extruderCount(state.machine || {}))[key];
+  }
+  if (state.process && key in state.process) return state.process[key];
+  if (state.machine && key in state.machine) return state.machine[key];
+  return undefined;
+}
+
+function effective(key) {
+  return key in state.overrides ? state.overrides[key] : baseValue(key);
+}
+
+function setOverride(key, value) {
+  if (value === undefined || same(value, baseValue(key))) delete state.overrides[key];
+  else state.overrides[key] = value;
+}
+
+/** Drop the user's changes that belong to one settings tab (when its preset changes). */
+function clearOverrides(tab) {
+  for (const key of Object.keys(state.overrides)) {
+    const t = state.keyTab.get(key) || (key in (state.filament || {}) ? 'filament' : key in (state.machine || {}) ? 'machine' : 'process');
+    if (t === tab) delete state.overrides[key];
+  }
+}
+
+function effectiveMachine() {
+  const m = { ...(state.machine || {}) };
+  for (const [k, v] of Object.entries(state.overrides)) if (k in m || state.keyTab.get(k) === 'machine') m[k] = v;
+  return m;
+}
+
+/** The ordered setting layers the engine applies for a slice. */
+function settingLayers() {
+  const slots = extruderCount(effectiveMachine());
+  const changes = {};
+  for (const [k, v] of Object.entries(state.overrides)) {
+    const base = baseValue(k);
+    changes[k] = Array.isArray(v) && v.length === 1 && Array.isArray(base) && base.length > 1 ? Array(base.length).fill(v[0]) : v;
+  }
+  return [
+    { settings: state.machine },
+    { settings: state.process },
+    { settings: filamentForSlots(state.filament, slots) },
+    {
+      format: 'orca.native-json',
+      settings: {
+        curr_bed_type: ui.bedTypeSelect.value,
+        printer_settings_id: state.printer.name,
+        print_settings_id: state.processName,
+        filament_settings_id: Array(slots).fill(state.filamentName),
+        ...changes,
+      },
+    },
+  ];
+}
+
+function settingsChanged() {
+  fillQuick();
+  updateBed();
+  updateAdvCount();
+  invalidateAll();
+  save();
+}
+
 // --------------------------------------------------------------- profiles --
 
 async function initProfiles() {
@@ -142,11 +248,18 @@ async function initProfiles() {
     state.userPresets[t] = Array.isArray(state.saved.userPresets?.[t]) ? state.saved.userPresets[t] : [];
   }
   BED_TYPES.forEach((b) => ui.bedTypeSelect.append(option(b.value, b.label)));
-  await selectVendor(wanted, state.saved.printer);
+  await selectVendor(wanted, { printer: state.saved.printer, process: state.saved.process, filament: state.saved.filament, restoring: true });
+  if (state.saved.overrides && typeof state.saved.overrides === 'object') {
+    state.overrides = { ...state.saved.overrides };
+    for (const k of Object.keys(state.overrides)) setOverride(k, state.overrides[k]);
+  }
+  if (BED_TYPES.some((b) => b.value === state.saved.bedType)) ui.bedTypeSelect.value = state.saved.bedType;
+  settingsChanged();
 }
 
-async function selectVendor(name, preferredPrinter) {
+async function selectVendor(name, prefer = {}) {
   const v = state.index.vendors.find((x) => x.name === name);
+  ui.vendorSelect.value = name;
   state.vendor = await loadVendor(v.index);
   const opts = state.vendor.printers.map((p) => option(p.name, p.name));
   const userMachines = state.userPresets.machine.filter((u) => u.vendor === name);
@@ -158,13 +271,13 @@ async function selectVendor(name, preferredPrinter) {
   }
   ui.printerSelect.replaceChildren(...opts);
   const has = (n) => [...ui.printerSelect.querySelectorAll('option')].some((o) => o.value === n);
-  ui.printerSelect.value = preferredPrinter && has(preferredPrinter)
-    ? preferredPrinter
+  ui.printerSelect.value = prefer.printer && has(prefer.printer)
+    ? prefer.printer
     : (state.vendor.printers.find((p) => /0\.4/.test(p.name)) || state.vendor.printers[0]).name;
-  await selectPrinter(ui.printerSelect.value, true);
+  await selectPrinter(ui.printerSelect.value, prefer);
 }
 
-async function selectPrinter(value, restoring = false) {
+async function selectPrinter(value, prefer = {}) {
   let printer, machine;
   if (value.startsWith('user:')) {
     const u = state.userPresets.machine.find((x) => 'user:' + x.name === value);
@@ -178,25 +291,32 @@ async function selectPrinter(value, restoring = false) {
   }
   state.printer = printer;
   state.machine = machine;
-
-  const bed = bedFromMachine(machine);
-  viewer.setBed(bed);
-  if (!restoring || !state.objects.length) viewer.resetCamera();
-  ui.bedInfo.textContent = `Build volume ${Math.round(bed.width)} × ${Math.round(bed.depth)} × ${Math.round(bed.height)} mm` +
-    (printer.nozzle ? ` · ${printer.nozzle} mm nozzle` : '');
+  if (!prefer.restoring) clearOverrides('machine');
 
   const bedDefault = { 1: 'Cool Plate', 2: 'Engineering Plate', 3: 'High Temp Plate', 4: 'Textured PEI Plate' }[printer.defaultBedType]
     || printer.defaultBedType || 'Textured PEI Plate';
-  const savedBed = restoring && state.saved.bedType;
-  ui.bedTypeSelect.value = BED_TYPES.some((b) => b.value === savedBed) ? savedBed
-    : BED_TYPES.some((b) => b.value === bedDefault) ? bedDefault : 'Textured PEI Plate';
+  ui.bedTypeSelect.value = BED_TYPES.some((b) => b.value === bedDefault) ? bedDefault : 'Textured PEI Plate';
 
-  fillProcesses(restoring ? state.saved.process : null);
-  fillFilaments(restoring ? state.saved.filament : null);
-  await Promise.all([selectProcess(ui.processSelect.value, restoring), selectFilament(ui.filamentSelect.value)]);
+  fillProcesses(prefer.process);
+  fillFilaments(prefer.filament);
+  await Promise.all([
+    selectProcess(ui.processSelect.value, prefer.restoring),
+    selectFilament(ui.filamentSelect.value, prefer.restoring),
+  ]);
+  updateBed(true);
+  if (!prefer.restoring) settingsChanged();
+}
+
+function updateBed(resetCamera = false) {
+  if (!state.machine) return;
+  const bed = bedFromMachine(effectiveMachine());
+  const b = viewer.bed;
+  const changed = !b || b.width !== bed.width || b.depth !== bed.depth || b.height !== bed.height || b.shape !== bed.shape;
+  if (changed) viewer.setBed(bed);
+  if ((changed || resetCamera) && !state.objects.length) viewer.resetCamera();
+  ui.bedInfo.textContent = `Build volume ${Math.round(bed.width)} × ${Math.round(bed.depth)} × ${Math.round(bed.height)} mm` +
+    (state.printer?.nozzle ? ` · ${state.printer.nozzle} mm nozzle` : '');
   objectsChanged();
-  invalidate();
-  save();
 }
 
 function fillProcesses(preferred) {
@@ -254,7 +374,7 @@ function fillFilaments(preferred) {
         : genericPla || all[0];
 }
 
-async function selectProcess(value, restoring = false) {
+async function selectProcess(value, keepChanges = false) {
   if (value.startsWith('user:')) {
     const u = state.userPresets.process.find((x) => 'user:' + x.name === value);
     state.process = await resolveUserPreset(u.data);
@@ -264,12 +384,13 @@ async function selectProcess(value, restoring = false) {
     state.process = await resolveFile(entry.file);
     state.processName = value;
   }
-  fillQuick(restoring ? state.saved.quick : null);
-  invalidate();
-  save();
+  if (!keepChanges) {
+    clearOverrides('process');
+    settingsChanged();
+  }
 }
 
-async function selectFilament(value) {
+async function selectFilament(value, keepChanges = false) {
   if (value.startsWith('user:')) {
     const u = state.userPresets.filament.find((x) => 'user:' + x.name === value);
     state.filament = await resolveUserPreset(u.data);
@@ -284,82 +405,74 @@ async function selectFilament(value) {
     state.filament = await resolveFile(entry.file);
     state.filamentName = value;
   }
-  invalidate();
-  save();
+  if (!keepChanges) {
+    clearOverrides('filament');
+    settingsChanged();
+  }
 }
 
-// Quick settings: shown with the profile's values; only changed ones are sent.
-function profileQuickValues() {
-  const p = state.process || {};
-  const support = String(first(p.enable_support) ?? '0') === '1'
-    ? (/tree/.test(String(first(p.support_type) || '')) ? 'tree' : 'normal')
+// Quick settings are shortcuts to five of the full settings.
+function quickValues(get) {
+  const support = String(first(get('enable_support')) ?? '0') === '1'
+    ? (/tree/.test(String(first(get('support_type')) || '')) ? 'tree' : 'normal')
     : 'off';
+  const brim = first(get('brim_type'));
   return {
-    layer: parseFloat(first(p.layer_height)) || 0.2,
-    infill: parseFloat(String(first(p.sparse_infill_density) ?? '15').replace('%', '')) || 0,
-    walls: parseInt(first(p.wall_loops), 10) || 2,
+    layer: parseFloat(first(get('layer_height'))) || 0.2,
+    infill: parseFloat(String(first(get('sparse_infill_density')) ?? '15').replace('%', '')) || 0,
+    walls: parseInt(first(get('wall_loops')), 10) || 0,
     support,
-    brim: ['auto_brim', 'no_brim', 'outer_only'].includes(first(p.brim_type)) ? first(p.brim_type)
-      : first(p.brim_type) && first(p.brim_type) !== 'no_brim' ? 'outer_only' : 'auto_brim',
+    brim: ['auto_brim', 'no_brim', 'outer_only'].includes(brim) ? brim : brim && brim !== 'no_brim' ? 'outer_only' : 'auto_brim',
   };
 }
 
-function fillQuick(saved) {
-  const base = profileQuickValues();
-  const v = { ...base, ...(saved && saved.process === state.processName ? saved.values : {}) };
+function fillQuick() {
+  const v = quickValues(effective);
   ui.qLayer.value = v.layer;
   ui.qInfill.value = v.infill;
   ui.qWalls.value = v.walls;
   ui.qSupport.value = v.support;
   ui.qBrim.value = v.brim;
+  // A brim setting the quick list can't show (e.g. mouse ears) is shown as "On".
+  const b = first(effective('brim_type'));
+  ui.qBrim.title = b && !['auto_brim', 'no_brim', 'outer_only'].includes(b) ? `Profile/Advanced value: ${b}` : '';
 }
 
-function quickOverridesRaw() {
-  return {
-    process: state.processName,
-    values: {
-      layer: parseFloat(ui.qLayer.value),
-      infill: parseFloat(ui.qInfill.value),
-      walls: parseInt(ui.qWalls.value, 10),
-      support: ui.qSupport.value,
-      brim: ui.qBrim.value,
-    },
-  };
-}
-
-function quickSettingsPatch() {
-  const base = profileQuickValues();
-  const v = quickOverridesRaw().values;
-  const patch = {};
-  if (Number.isFinite(v.layer) && Math.abs(v.layer - base.layer) > 1e-6) patch.layer_height = String(v.layer);
-  if (Number.isFinite(v.infill) && v.infill !== base.infill) patch.sparse_infill_density = `${Math.max(0, Math.min(100, v.infill))}%`;
-  if (Number.isFinite(v.walls) && v.walls !== base.walls) patch.wall_loops = String(Math.max(1, v.walls));
-  if (v.support !== base.support) {
-    patch.enable_support = v.support === 'off' ? '0' : '1';
-    if (v.support !== 'off') patch.support_type = v.support === 'tree' ? 'tree(auto)' : 'normal(auto)';
+function quickChanged() {
+  const base = quickValues(baseValue);
+  const layer = parseFloat(ui.qLayer.value);
+  const infill = parseFloat(ui.qInfill.value);
+  const walls = parseInt(ui.qWalls.value, 10);
+  const asArray = (key, v) => (Array.isArray(baseValue(key)) ? [v] : v);
+  if (Number.isFinite(layer) && layer > 0) {
+    setOverride('layer_height', Math.abs(layer - base.layer) < 1e-9 ? undefined : asArray('layer_height', String(layer)));
   }
-  if (v.brim !== base.brim) patch.brim_type = v.brim;
-  return patch;
+  if (Number.isFinite(infill)) {
+    const v = Math.max(0, Math.min(100, infill));
+    setOverride('sparse_infill_density', v === base.infill ? undefined : asArray('sparse_infill_density', `${v}%`));
+  }
+  if (Number.isFinite(walls)) {
+    const v = Math.max(1, walls);
+    setOverride('wall_loops', v === base.walls ? undefined : asArray('wall_loops', String(v)));
+  }
+  const sup = ui.qSupport.value;
+  if (sup === base.support) {
+    setOverride('enable_support', undefined);
+    setOverride('support_type', undefined);
+  } else {
+    setOverride('enable_support', asArray('enable_support', sup === 'off' ? '0' : '1'));
+    if (sup !== 'off') setOverride('support_type', asArray('support_type', sup === 'tree' ? 'tree(auto)' : 'normal(auto)'));
+    else setOverride('support_type', undefined);
+  }
+  const brim = ui.qBrim.value;
+  setOverride('brim_type', brim === base.brim ? undefined : asArray('brim_type', brim));
+  settingsChanged();
+  if (editor?.isOpen) editor.render();
 }
 
-/** The ordered setting layers the engine applies for a slice. */
-function settingLayers() {
-  const slots = extruderCount(state.machine);
-  return [
-    { settings: state.machine },
-    { settings: state.process },
-    { settings: filamentForSlots(state.filament, slots) },
-    {
-      format: 'orca.native-json',
-      settings: {
-        curr_bed_type: ui.bedTypeSelect.value,
-        printer_settings_id: state.printer.name,
-        print_settings_id: state.processName,
-        filament_settings_id: Array(slots).fill(state.filamentName),
-        ...quickSettingsPatch(),
-      },
-    },
-  ];
+function updateAdvCount() {
+  const n = Object.keys(state.overrides).length;
+  ui.advCount.textContent = n ? `${n} changed` : '';
 }
 
 async function importPresets(files) {
@@ -384,8 +497,10 @@ async function importPresets(files) {
   }
   if (!added.length) return;
   save();
-  const keepPrinter = ui.printerSelect.value;
-  await selectVendor(state.vendor.vendor, keepPrinter);
+  await selectVendor(state.vendor.vendor, {
+    printer: ui.printerSelect.value, process: ui.processSelect.value, filament: ui.filamentSelect.value, restoring: true,
+  });
+  settingsChanged();
   showMessage(`Imported: ${added.join(', ')}. Pick them under "Imported" in the lists.`);
 }
 
@@ -396,9 +511,99 @@ function guessType(preset) {
   return '';
 }
 
+// ----------------------------------------------------------------- plates --
+
+function addPlate(name = '') {
+  const plate = { id: 'plate-' + state.nextPlate++, name };
+  state.plates.push(plate);
+  return plate;
+}
+
+function plateLabel(plate) {
+  return plate.name || `Plate ${state.plates.indexOf(plate) + 1}`;
+}
+
+function objectsOn(plateId) {
+  return state.objects.filter((o) => o.plateId === plateId);
+}
+
+function setActivePlate(id) {
+  state.activePlate = id;
+  viewer.setActivePlate(id);
+  if (selected() && selected().plateId !== id) viewer.select(null);
+  renderPlates();
+  objectsChanged();
+  const r = state.results.get(id);
+  if (viewer.mode === 'preview') {
+    if (r && !r.stale) showPreview(id); else setTab('prepare');
+  }
+  renderResult();
+}
+
+function renderPlates() {
+  ui.plateList.replaceChildren(...state.plates.map((p) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'plate-chip' + (p.id === state.activePlate ? ' active' : '');
+    const n = objectsOn(p.id).length;
+    const r = state.results.get(p.id);
+    b.textContent = plateLabel(p);
+    const meta = document.createElement('span');
+    meta.className = 'chip-meta';
+    meta.textContent = `${n}` + (r && !r.stale ? ' ✓' : '');
+    meta.title = `${n} model${n === 1 ? '' : 's'}` + (r && !r.stale ? ', sliced' : '');
+    b.append(meta);
+    b.onclick = () => setActivePlate(p.id);
+    return b;
+  }));
+  ui.delPlateBtn.disabled = state.plates.length <= 1;
+  ui.objPlate.replaceChildren(...state.plates.map((p) => option(p.id, plateLabel(p))));
+}
+
+function deletePlate() {
+  if (state.plates.length <= 1) return;
+  const plate = state.plates.find((p) => p.id === state.activePlate);
+  const items = objectsOn(plate.id);
+  if (items.length && !confirm(`Delete ${plateLabel(plate)} and the ${items.length} model(s) on it?`)) return;
+  for (const item of items) removeItem(item);
+  state.results.delete(plate.id);
+  const i = state.plates.indexOf(plate);
+  state.plates.splice(i, 1);
+  setActivePlate(state.plates[Math.max(0, i - 1)].id);
+}
+
 // ----------------------------------------------------------------- models --
 
 const viewer = new Viewer(ui.viewport);
+
+function newItem({ name, positions, plateId, modifiers = [], x, y, quaternion, scale, placed = false }) {
+  return {
+    id: 'obj-' + state.nextId++,
+    name,
+    positions,
+    stl: null,
+    plateId: plateId || state.activePlate,
+    x: x ?? viewer.bed.width / 2,
+    y: y ?? viewer.bed.depth / 2,
+    quaternion: quaternion || new THREE.Quaternion(),
+    scale: scale || [1, 1, 1],
+    modifiers,
+    placed,
+  };
+}
+
+function addItem(item) {
+  state.objects.push(item);
+  viewer.addObject(item);
+  invalidatePlate(item.plateId);
+  return item;
+}
+
+function removeItem(item) {
+  state.objects = state.objects.filter((o) => o !== item);
+  viewer.removeObject(item.id);
+  invalidatePlate(item.plateId);
+}
 
 async function addFiles(files) {
   const list = [...files];
@@ -412,6 +617,10 @@ async function addFiles(files) {
     }
     try {
       let bytes = new Uint8Array(await file.arrayBuffer());
+      if (kind === '3mf') {
+        await add3mfModels(bytes, file.name);
+        continue;
+      }
       if (kind !== 'stl') {
         if (!state.engineReady) {
           throw new Error(state.engineError
@@ -423,8 +632,9 @@ async function addFiles(files) {
       }
       const positions = parseStl(bytes);
       if (positions.length === 0) throw new Error('The file contains no triangles.');
-      const b = normalise(positions);
-      addObject({ name: file.name.replace(/\.[^.]+$/, ''), positions, size: b.size });
+      normalise(positions);
+      const item = addItem(newItem({ name: file.name.replace(/\.[^.]+$/, ''), positions }));
+      viewer.select(item.id);
       showMessage('');
     } catch (error) {
       showMessage(`${file.name}: ${errorText(error)}`, 'error');
@@ -433,25 +643,61 @@ async function addFiles(files) {
   placeNewObjects();
 }
 
-function addObject({ name, positions, size, from }) {
-  const bed = viewer.bed;
-  const item = {
-    id: 'obj-' + state.nextObjectId++,
-    name,
-    positions,
-    stl: null,
-    size,
-    x: from ? from.x + Math.min(from.size[0] * from.scale[0] + 5, 40) : bed.width / 2,
-    y: from ? from.y : bed.depth / 2,
-    quaternion: from ? from.quaternion.clone() : new THREE.Quaternion(),
-    scale: from ? [...from.scale] : [1, 1, 1],
-    placed: !!from,
-  };
-  state.objects.push(item);
-  viewer.addObject(item);
-  viewer.select(item.id);
-  objectsChanged();
-  return item;
+/** Models from a 3MF, keeping their arrangement, onto the current plate (settings are not used). */
+async function add3mfModels(bytes, fileName) {
+  let project;
+  try {
+    project = await readProjectFile(bytes, viewer.bed);
+  } catch (error) {
+    if (!state.engineReady) throw error;
+    // Not an OrcaSlicer/3MF layout we can read ourselves: let the engine flatten it.
+    const stl = await engine.convert('3mf', bytes);
+    const positions = parseStl(stl);
+    normalise(positions);
+    addItem(newItem({ name: fileName.replace(/\.[^.]+$/, ''), positions }));
+    return;
+  }
+  const items = itemsFromProject(project, () => state.activePlate);
+  for (const item of items) {
+    addItem(item);
+    item.placed = viewer.isInside(item.id);
+  }
+  if (items.length) viewer.select(items[0].id);
+  if (project.warnings.length) showMessage(project.warnings.join('\n'));
+}
+
+/** Turn the project reader's objects into plate items (meshes normalised, matrices compensated). */
+function itemsFromProject(project, plateFor) {
+  const items = [];
+  for (const obj of project.objects) {
+    const before = bounds(obj.positions);
+    const c = new THREE.Vector3((before.min[0] + before.max[0]) / 2, (before.min[1] + before.max[1]) / 2, before.min[2]);
+    normalise(obj.positions);
+    const shift = new THREE.Matrix4().makeTranslation(-c.x, -c.y, -c.z);
+    for (const inst of obj.instances) {
+      const m = new THREE.Matrix4().fromArray(inst.matrix).multiply(new THREE.Matrix4().makeTranslation(c.x, c.y, c.z));
+      const pos = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3();
+      m.decompose(pos, q, s);
+      items.push(newItem({
+        name: obj.name,
+        positions: obj.positions,
+        plateId: plateFor(inst.plateIndex),
+        x: pos.x,
+        y: pos.y,
+        quaternion: q,
+        scale: [s.x, s.y, s.z],
+        placed: true,
+        modifiers: obj.modifiers.map((mod) => ({
+          id: 'mod-' + state.nextId++,
+          role: mod.role,
+          positions: mod.positions,
+          matrix: shift.clone(),
+          stl: null,
+        })),
+      }));
+    }
+  }
+  return items;
 }
 
 /** New models are dropped on a free spot; if none is free we ask the engine to arrange. */
@@ -465,7 +711,7 @@ function placeNewObjects() {
     if (spot) { item.x = spot.x; item.y = spot.y; viewer.updateObject(item); } else needArrange = true;
   }
   objectsChanged();
-  if (needArrange && state.engineReady && state.objects.length > 1) arrange();
+  if (needArrange && state.engineReady && objectsOn(state.activePlate).length > 1) arrange('arrange');
 }
 
 function footprint(item) {
@@ -478,7 +724,7 @@ function findFreeSpot(item) {
   const f = footprint(item);
   if (!f) return null;
   const gap = 5;
-  const others = state.objects.filter((o) => o !== item).map((o) => viewer.worldBox(o.id)).filter(Boolean);
+  const others = objectsOn(item.plateId).filter((o) => o !== item).map((o) => viewer.worldBox(o.id)).filter(Boolean);
   const candidates = [];
   const step = 5;
   for (let y = f.d / 2; y <= D - f.d / 2 + 0.01; y += step) {
@@ -498,11 +744,17 @@ function selected() {
   return state.objects.find((o) => o.id === viewer.selectedId) || null;
 }
 
+function selectedModifier() {
+  const item = selected();
+  return item && item.modifiers.find((m) => m.id === viewer.selectedModifierId) || null;
+}
+
 function objectsChanged() {
-  ui.dropHint.hidden = state.objects.length > 0;
-  ui.objectBar.hidden = state.objects.length === 0;
+  const onPlate = objectsOn(state.activePlate);
+  ui.dropHint.hidden = viewer.mode !== 'prepare' || state.objects.length > 0;
+  ui.objectBar.hidden = viewer.mode !== 'prepare' || onPlate.length === 0;
   const sel = selected();
-  ui.objectList.replaceChildren(...state.objects.map((o) => {
+  ui.objectList.replaceChildren(...onPlate.map((o) => {
     const li = document.createElement('li');
     const b = document.createElement('button');
     b.type = 'button';
@@ -518,11 +770,13 @@ function objectsChanged() {
     const box = viewer.worldBox(sel.id);
     const dims = box ? [box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z].map((v) => v.toFixed(1)).join(' × ') : '';
     ui.selectionInfo.textContent = `${sel.name}: ${dims} mm` + (viewer.isInside(sel.id) ? '' : ' · outside the printable area');
-    ui.scaleInput.value = Math.round(sel.scale[0] * 1000) / 10;
+    ui.scaleInput.value = Math.round(Math.abs(sel.scale[0]) * 1000) / 10;
   } else {
-    const outside = state.objects.filter((o) => !viewer.isInside(o.id)).length;
+    const outside = onPlate.filter((o) => !viewer.isInside(o.id)).length;
     ui.selectionInfo.textContent = outside ? `${outside} model(s) outside the printable area (shown in red)` : 'Click a model to select it; drag to move it.';
   }
+  renderObjectPanel();
+  renderPlates();
   updateButtons();
 }
 
@@ -532,90 +786,230 @@ function rotateSelected(axis) {
   const q = new THREE.Quaternion().setFromAxisAngle(axis, Math.PI / 2);
   item.quaternion.premultiply(q);
   viewer.updateObject(item);
+  invalidatePlate(item.plateId);
   objectsChanged();
-  invalidate();
 }
 
 function scaleSelected(percent) {
   const item = selected();
   if (!item || !Number.isFinite(percent) || percent <= 0) return;
   const s = percent / 100;
-  item.scale = [s, s, s];
+  item.scale = item.scale.map((v) => Math.sign(v || 1) * s);
   viewer.updateObject(item);
+  invalidatePlate(item.plateId);
   objectsChanged();
-  invalidate();
 }
 
 function deleteSelected() {
+  const mod = selectedModifier();
+  if (mod) { deleteModifier(); return; }
   const item = selected();
   if (!item) return;
-  state.objects = state.objects.filter((o) => o !== item);
-  viewer.removeObject(item.id);
+  removeItem(item);
   objectsChanged();
-  invalidate();
 }
 
 function duplicateSelected() {
   const item = selected();
   if (!item) return;
-  const copy = addObject({ name: item.name, positions: item.positions, size: item.size, from: item });
+  const copy = newItem({
+    name: item.name,
+    positions: item.positions,
+    plateId: item.plateId,
+    x: item.x + 10,
+    y: item.y,
+    quaternion: item.quaternion.clone(),
+    scale: [...item.scale],
+    placed: true,
+    modifiers: item.modifiers.map((m) => ({ ...m, id: 'mod-' + state.nextId++, matrix: m.matrix.clone() })),
+  });
   copy.stl = item.stl;
+  addItem(copy);
   const spot = findFreeSpot(copy);
   if (spot) { copy.x = spot.x; copy.y = spot.y; viewer.updateObject(copy); }
+  viewer.select(copy.id);
   objectsChanged();
-  invalidate();
 }
 
-/** Project manifest + mesh blob in the engine's one-slicer-api format. */
-function buildProject() {
+function moveSelectedToPlate(plateId) {
+  const item = selected();
+  if (!item || item.plateId === plateId) return;
+  invalidatePlate(item.plateId);
+  item.plateId = plateId;
+  const spot = findFreeSpot(item);
+  if (spot) { item.x = spot.x; item.y = spot.y; viewer.updateObject(item); }
+  invalidatePlate(plateId);
+  setActivePlate(plateId);
+  viewer.select(item.id);
+}
+
+// ------------------------------------------------------- support boxes ----
+
+function unitBox() {
+  const v = [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5],
+    [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]];
+  const f = [[0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7], [0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5], [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7]];
+  return Float32Array.from(f.flatMap((t) => t.flatMap((i) => v[i])));
+}
+
+function addModifier(role) {
+  const item = selected();
+  if (!item) return;
+  const geo = viewer.objects.get(item.id).mesh.geometry;
+  const bb = geo.boundingBox;
+  const size = new THREE.Vector3().subVectors(bb.max, bb.min);
+  const box = size.clone().multiplyScalar(0.5).max(new THREE.Vector3(5, 5, 5));
+  const center = new THREE.Vector3((bb.min.x + bb.max.x) / 2, (bb.min.y + bb.max.y) / 2, bb.min.z + size.z * 0.5);
+  const mod = {
+    id: 'mod-' + state.nextId++,
+    role,
+    positions: unitBox(),
+    matrix: new THREE.Matrix4().compose(center, new THREE.Quaternion(), box),
+    stl: null,
+  };
+  item.modifiers.push(mod);
+  viewer.addModifier(item, mod);
+  viewer.select(item.id, mod.id);
+  invalidatePlate(item.plateId);
+  if (role === 'support-enforcer' && first(effective('enable_support')) !== '1') {
+    showMessage('Support enforcer added. Supports are generated inside it when "Supports" is on (Normal or Tree); turn them on in Print settings.');
+  }
+}
+
+/** Center and size of a support box, in the model's own millimetres. */
+function modifierBox(mod) {
+  const bb = new THREE.Box3();
+  const v = new THREE.Vector3();
+  const p = mod.positions;
+  for (let i = 0; i < p.length; i += 3) bb.expandByPoint(v.set(p[i], p[i + 1], p[i + 2]).applyMatrix4(mod.matrix));
+  return { center: bb.getCenter(new THREE.Vector3()), size: bb.getSize(new THREE.Vector3()) };
+}
+
+function editModifier() {
+  const item = selected();
+  const mod = selectedModifier();
+  if (!item || !mod) return;
+  const { center, size } = modifierBox(mod);
+  const nc = new THREE.Vector3(+ui.modX.value, +ui.modY.value, +ui.modZ.value);
+  const ns = new THREE.Vector3(Math.max(0.5, +ui.modW.value), Math.max(0.5, +ui.modD.value), Math.max(0.5, +ui.modH.value));
+  if (![nc.x, nc.y, nc.z, ns.x, ns.y, ns.z].every(Number.isFinite)) return;
+  const k = new THREE.Vector3(size.x ? ns.x / size.x : 1, size.y ? ns.y / size.y : 1, size.z ? ns.z / size.z : 1);
+  const m = new THREE.Matrix4().makeTranslation(nc.x, nc.y, nc.z)
+    .multiply(new THREE.Matrix4().makeScale(k.x, k.y, k.z))
+    .multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z))
+    .multiply(mod.matrix);
+  mod.matrix = m;
+  mod.stl = null;
+  viewer.updateModifier(item, mod);
+  invalidatePlate(item.plateId);
+  renderObjectPanel();
+}
+
+function deleteModifier() {
+  const item = selected();
+  const mod = selectedModifier();
+  if (!item || !mod) return;
+  item.modifiers = item.modifiers.filter((m) => m !== mod);
+  viewer.removeModifier(item, mod.id);
+  viewer.select(item.id);
+  invalidatePlate(item.plateId);
+}
+
+function renderObjectPanel() {
+  const item = selected();
+  ui.objPanel.hidden = !item || viewer.mode !== 'prepare';
+  if (!item) return;
+  ui.objName.textContent = item.name;
+  ui.objPlate.value = item.plateId;
+  ui.objPlate.parentElement.hidden = state.plates.length < 2;
+  const mod = selectedModifier();
+  ui.modList.replaceChildren(...item.modifiers.map((m, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'mod-chip ' + m.role + (m === mod ? ' active' : '');
+    b.textContent = (m.role === 'support-enforcer' ? 'Enforcer ' : 'Blocker ') + (i + 1);
+    b.onclick = () => viewer.select(item.id, m.id);
+    return b;
+  }));
+  ui.modEdit.hidden = !mod;
+  if (mod) {
+    const { center, size } = modifierBox(mod);
+    ui.modTitle.textContent = mod.role === 'support-enforcer' ? 'Support enforcer' : 'Support blocker';
+    const set = (inp, v) => { if (document.activeElement !== inp) inp.value = (Math.round(v * 10) / 10).toString(); };
+    set(ui.modX, center.x); set(ui.modY, center.y); set(ui.modZ, center.z);
+    set(ui.modW, size.x); set(ui.modD, size.y); set(ui.modH, size.z);
+  }
+}
+
+// -------------------------------------------------------------- manifest --
+
+/** Project manifest + mesh blob in the engine's one-slicer-api format, for the given plates. */
+function buildProject(plateIds) {
+  const plates = state.plates.filter((p) => plateIds.includes(p.id));
+  const items = state.objects.filter((o) => plateIds.includes(o.plateId));
   const meshes = [];
   const chunks = [];
   let offset = 0;
   const meshIdFor = new Map();
-  for (const item of state.objects) {
-    // Copies share their geometry, so they share one mesh.
-    if (meshIdFor.has(item.positions)) continue;
-    if (!item.stl) item.stl = toBinaryStl(item.positions);
+  const addMesh = (positions, key, stl) => {
+    if (meshIdFor.has(key)) return meshIdFor.get(key);
+    const data = stl || toBinaryStl(positions);
     const id = 'mesh-' + meshes.length;
-    meshIdFor.set(item.positions, id);
-    meshes.push({ id, format: 'stl', dataRange: { offset, length: item.stl.length } });
-    chunks.push(item.stl);
-    offset += item.stl.length;
+    meshIdFor.set(key, id);
+    meshes.push({ id, format: 'stl', dataRange: { offset, length: data.length } });
+    chunks.push(data);
+    offset += data.length;
+    return id;
+  };
+  const objects = [];
+  const instances = [];
+  const modifierVolumes = [];
+  for (const item of items) {
+    if (!item.stl) item.stl = toBinaryStl(item.positions);
+    const meshId = addMesh(item.positions, item.positions, item.stl);
+    const geometry = viewer.objects.get(item.id).mesh.geometry;
+    objects.push({ id: item.id, meshId, label: item.name.slice(0, 200), extruderId: 0 });
+    instances.push({
+      id: 'inst-' + item.id,
+      objectId: item.id,
+      plateId: item.plateId,
+      transform: { matrix: toRowMajor(instanceMatrix(item, geometry)) },
+    });
+    for (const mod of item.modifiers) {
+      if (!mod.stl) mod.stl = toBinaryStl(mod.positions);
+      const modMesh = addMesh(mod.positions, mod.positions, mod.stl);
+      modifierVolumes.push({
+        id: mod.id,
+        meshId: modMesh,
+        role: mod.role,
+        objectId: item.id,
+        plateId: item.plateId,
+        transform: { matrix: toRowMajor(mod.matrix) },
+      });
+    }
   }
   const blob = new Uint8Array(offset);
   let o = 0;
   for (const c of chunks) { blob.set(c, o); o += c.length; }
-
-  const objects = [];
-  const instances = [];
-  for (const item of state.objects) {
-    const geometry = viewer.objects.get(item.id).mesh.geometry;
-    objects.push({ id: item.id, meshId: meshIdFor.get(item.positions), label: item.name, extruderId: 0 });
-    instances.push({
-      id: 'inst-' + item.id,
-      objectId: item.id,
-      plateId: PLATE_ID,
-      transform: { matrix: toRowMajor(instanceMatrix(item, geometry)) },
-    });
-  }
   return {
     blob,
     manifest: {
       schemaVersion: API_VERSION,
-      plates: [{ id: PLATE_ID, label: 'Plate 1', index: 0 }],
+      plates: plates.map((p, i) => ({ id: p.id, label: plateLabel(p), index: i })),
       meshes,
       objects,
       instances,
-      modifierVolumes: [],
+      modifierVolumes,
     },
   };
 }
 
 const arrange = withBusy(async (operation = 'arrange') => {
-  if (!state.objects.length) return;
+  const onPlate = objectsOn(state.activePlate);
+  if (!onPlate.length) return;
   showMessage(operation === 'arrange' ? 'Arranging…' : 'Finding the best orientation…');
   try {
-    const { blob, manifest } = buildProject();
+    const { blob, manifest } = buildProject([state.activePlate]);
     const { manifest: out } = await engine.arrange(settingLayers(), blob, manifest, operation);
     for (const inst of out.instances || []) {
       const item = state.objects.find((o) => 'inst-' + o.id === inst.id || o.id === inst.objectId);
@@ -624,7 +1018,7 @@ const arrange = withBusy(async (operation = 'arrange') => {
       const pos = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3();
       m.decompose(pos, q, s);
       item.quaternion.copy(q);
-      item.scale = [Math.abs(s.x), Math.abs(s.y), Math.abs(s.z)];
+      item.scale = [s.x, s.y, s.z];
       item.x = pos.x;
       item.y = pos.y;
       viewer.updateObject(item);
@@ -633,8 +1027,8 @@ const arrange = withBusy(async (operation = 'arrange') => {
   } catch (error) {
     showMessage(`${operation === 'arrange' ? 'Arrange' : 'Auto-orient'} failed: ${errorText(error)}`, 'error');
   }
+  invalidatePlate(state.activePlate);
   objectsChanged();
-  invalidate();
 });
 
 // ---------------------------------------------------------------- slicing --
@@ -654,30 +1048,38 @@ function parseGcodeForPreview(text) {
   });
 }
 
-function invalidate() {
-  if (!state.result) return;
-  state.stale = true;
-  ui.result.classList.add('stale');
-  ui.downloadBtn.disabled = true;
-  ui.rNote.textContent = 'Settings or models changed: slice again to update the G-code.';
-  ui.tabPreview.disabled = true;
-  if (viewer.mode === 'preview') setTab('prepare');
+function invalidatePlate(plateId) {
+  const r = state.results.get(plateId);
+  if (r && !r.stale) {
+    r.stale = true;
+    if (state.previewPlate === plateId && viewer.mode === 'preview') setTab('prepare');
+  }
+  renderResult();
+  renderPlates();
 }
 
-async function slice() {
-  if (!state.objects.length) return;
-  const outside = state.objects.filter((o) => !viewer.isInside(o.id));
+function invalidateAll() {
+  for (const id of state.results.keys()) invalidatePlate(id);
+}
+
+async function slice(all = false) {
+  const plateIds = (all ? state.plates.map((p) => p.id) : [state.activePlate]).filter((id) => objectsOn(id).length);
+  if (!plateIds.length) {
+    showMessage('Add a model to the plate first.');
+    return;
+  }
+  const outside = state.objects.filter((o) => plateIds.includes(o.plateId) && !viewer.isInside(o.id));
   if (outside.length) {
-    showMessage(`Move ${outside.map((o) => o.name).join(', ')} inside the printable area first (shown in red), or use Arrange.`, 'error');
+    const where = all ? ' (' + [...new Set(outside.map((o) => plateLabel(state.plates.find((p) => p.id === o.plateId))))].join(', ') + ')' : '';
+    showMessage(`Move ${outside.map((o) => o.name).join(', ')}${where} inside the printable area first (shown in red), or use Arrange.`, 'error');
     return;
   }
   showMessage('');
-  ui.result.hidden = true;
   ui.progress.hidden = false;
   ui.progressFill.style.width = '0%';
   ui.progressText.textContent = 'Preparing…';
-  const { blob, manifest } = buildProject();
-  const job = engine.slice(settingLayers(), blob, manifest, PLATE_ID, (p) => {
+  const { blob, manifest } = buildProject(plateIds);
+  const job = engine.slice(settingLayers(), blob, manifest, plateIds, (p) => {
     if (Number.isFinite(p.percent)) ui.progressFill.style.width = p.percent + '%';
     if (p.stage) ui.progressText.textContent = p.stage;
   });
@@ -685,16 +1087,19 @@ async function slice() {
   updateButtons();
   try {
     const res = await job.promise;
-    const gcode = new Uint8Array(res.gcode);
-    state.result = { gcode, statistics: res.statistics, name: outputName() };
-    state.stale = false;
-    showResult(res);
+    for (const plate of res.plates) {
+      state.results.set(plate.plateId, {
+        gcode: new Uint8Array(plate.gcode),
+        statistics: plate.statistics,
+        name: outputName(plate.plateId),
+        stale: false,
+        skipped: res.skipped || [],
+      });
+    }
+    const show = plateIds.includes(state.activePlate) ? state.activePlate : plateIds[0];
+    if (show !== state.activePlate) setActivePlate(show);
     ui.progressText.textContent = 'Building preview…';
-    const text = new TextDecoder().decode(gcode);
-    const preview = await parseGcodeForPreview(text);
-    viewer.setPreview(preview);
-    setupLayerSlider(preview);
-    ui.tabPreview.disabled = false;
+    await showPreview(show);
     setTab('preview');
   } catch (error) {
     if (error && error.code === 'CANCELLED') showMessage('Slicing cancelled.');
@@ -702,45 +1107,71 @@ async function slice() {
   } finally {
     state.slicing = null;
     ui.progress.hidden = true;
+    renderResult();
+    renderPlates();
     updateButtons();
   }
 }
 
-function showResult(res) {
-  const st = res.statistics || {};
-  const t = st.timeSeconds?.normal;
+async function showPreview(plateId) {
+  const r = state.results.get(plateId);
+  if (!r) return;
+  if (state.previewPlate !== plateId || !viewer.previewData) {
+    const preview = await parseGcodeForPreview(new TextDecoder().decode(r.gcode));
+    viewer.setPreview(preview);
+    state.previewPlate = plateId;
+    setupLayerSlider(preview);
+  }
+}
+
+function renderResult() {
+  const r = state.results.get(state.activePlate);
+  ui.result.hidden = !r;
+  const fresh = [...state.results.entries()].filter(([id, x]) => !x.stale && state.plates.some((p) => p.id === id));
+  ui.downloadAllBtn.hidden = fresh.length < 2;
+  ui.downloadAllBtn.textContent = `Download all ${fresh.length} plates (.zip)`;
+  if (!r) return;
+  const st = r.statistics || {};
   const f = st.filament || {};
-  ui.rTime.textContent = fmtTime(t);
+  ui.rPlate.textContent = state.plates.length > 1 ? plateLabel(state.plates.find((p) => p.id === state.activePlate)) : '';
+  ui.rPlate.hidden = state.plates.length < 2;
+  ui.rTime.textContent = fmtTime(st.timeSeconds?.normal);
   const grams = f.totalMassG, metres = (f.totalLengthMm || 0) / 1000;
   ui.rFilament.textContent = Number.isFinite(grams) && grams > 0 ? `${grams.toFixed(1)} g` : metres ? `${metres.toFixed(2)} m` : '–';
   ui.rFilament.title = metres ? `${metres.toFixed(2)} m of filament` : '';
-  const skipped = res.skipped || [];
-  ui.rNote.textContent = (skipped.length
-    ? `Note: ${skipped.length} profile setting(s) were not accepted by the engine and were left at their defaults (${skipped.slice(0, 4).map((s) => s.key).join(', ')}${skipped.length > 4 ? ', …' : ''}). `
-    : '') + 'Copy the file to your printer (SD card, USB stick or its own upload page).';
-  ui.result.classList.remove('stale');
-  ui.downloadBtn.disabled = false;
-  ui.result.hidden = false;
+  ui.result.classList.toggle('stale', r.stale);
+  ui.downloadBtn.disabled = r.stale;
+  const skipped = r.skipped || [];
+  ui.rNote.textContent = r.stale
+    ? 'Settings or models changed: slice again to update the G-code.'
+    : (skipped.length
+      ? `Note: ${skipped.length} setting(s) were not accepted by the engine and were left at their defaults (${skipped.slice(0, 4).map((s) => s.key).join(', ')}${skipped.length > 4 ? ', …' : ''}). `
+      : '') + 'Copy the file to your printer (SD card, USB stick or its own upload page).';
 }
 
-function outputName() {
-  const base = state.objects.length === 1 ? state.objects[0].name : `${state.objects[0].name}+${state.objects.length - 1}`;
+function outputName(plateId) {
+  const items = objectsOn(plateId);
+  const base = state.projectName || (items.length === 1 ? items[0].name : `${items[0]?.name || 'print'}+${items.length - 1}`);
+  const plate = state.plates.length > 1 ? `plate${state.plates.findIndex((p) => p.id === plateId) + 1}` : '';
   const printer = (state.printer.model || state.printer.name).replace(/\s+/g, '');
-  const layer = ui.qLayer.value ? `${ui.qLayer.value}mm` : '';
+  const layer = first(effective('layer_height'));
   const mat = first(state.filament.filament_type) || '';
-  return [base, layer, mat, printer].filter(Boolean).join('_').replace(/[^\w.+-]+/g, '-') + '.gcode';
+  return [base, plate, layer ? `${layer}mm` : '', mat, printer].filter(Boolean).map(safeName).join('_') + '.gcode';
 }
 
 function download() {
-  if (!state.result || state.stale) return;
-  const blob = new Blob([state.result.gcode], { type: 'text/x-gcode' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = state.result.name;
-  document.body.append(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+  const r = state.results.get(state.activePlate);
+  if (!r || r.stale) return;
+  downloadBytes(r.gcode, r.name, 'text/x-gcode');
+}
+
+function downloadAll() {
+  const files = state.plates
+    .map((p) => state.results.get(p.id))
+    .filter((r) => r && !r.stale)
+    .map((r) => ({ name: r.name, data: r.gcode }));
+  if (!files.length) return;
+  downloadBytes(makeZip(files), safeName(state.projectName || 'plates') + '_gcode.zip', 'application/zip');
 }
 
 function setupLayerSlider(preview) {
@@ -776,36 +1207,202 @@ function setTab(tab) {
   ui.prepareTools.hidden = preview;
   ui.layerControls.hidden = !preview;
   ui.legend.hidden = !preview;
-  ui.objectBar.hidden = preview || state.objects.length === 0;
-  ui.dropHint.hidden = preview || state.objects.length > 0;
+  objectsChanged();
 }
 
 function updateButtons() {
-  const hasObjects = state.objects.length > 0;
+  const onPlate = objectsOn(state.activePlate).length > 0;
+  const anyObjects = state.objects.length > 0;
   const sel = !!selected();
   const busy = state.busy > 0 || !!state.slicing;
-  ui.sliceBtn.disabled = !state.engineReady || !hasObjects || busy || !state.machine;
-  ui.sliceBtn.textContent = !state.engineReady && !state.engineError ? 'Waiting for engine…' : 'Slice plate';
-  ui.arrangeBtn.disabled = !state.engineReady || !hasObjects || busy;
-  ui.orientBtn.disabled = !state.engineReady || !hasObjects || busy;
+  const ready = state.engineReady && !!state.machine;
+  ui.sliceBtn.disabled = !ready || !onPlate || busy;
+  ui.sliceBtn.textContent = !state.engineReady && !state.engineError ? 'Waiting for engine…'
+    : state.plates.length > 1 ? `Slice ${plateLabel(state.plates.find((p) => p.id === state.activePlate) || state.plates[0])}` : 'Slice plate';
+  const filled = state.plates.filter((p) => objectsOn(p.id).length).length;
+  ui.sliceAllBtn.hidden = filled < 2;
+  ui.sliceAllBtn.textContent = `Slice all ${filled} plates`;
+  ui.sliceAllBtn.disabled = !ready || busy;
+  ui.arrangeBtn.disabled = !state.engineReady || !onPlate || busy;
+  ui.orientBtn.disabled = !state.engineReady || !onPlate || busy;
+  ui.saveBtn.disabled = !state.engineReady || !anyObjects || busy;
+  ui.newBtn.disabled = busy;
+  ui.openBtn.disabled = busy;
+  const r = state.results.get(state.activePlate);
+  ui.tabPreview.disabled = !r || r.stale;
   for (const b of [ui.rotX, ui.rotY, ui.rotZ, ui.dupBtn, ui.delBtn, ui.scaleInput]) b.disabled = !sel || busy;
+}
+
+// --------------------------------------------------------------- projects --
+
+function resetPlates() {
+  for (const item of [...state.objects]) viewer.removeObject(item.id);
+  state.objects = [];
+  state.results.clear();
+  state.plates = [];
+  state.nextPlate = 1;
+  state.previewPlate = null;
+  viewer.clearPreview();
+  const p = addPlate();
+  state.activePlate = p.id;
+  viewer.setActivePlate(p.id);
+  setTab('prepare');
+  renderPlates();
+  renderResult();
+}
+
+function newProject() {
+  if (state.objects.length && !confirm('Start a new project? The models on all plates will be removed.')) return;
+  state.projectName = '';
+  resetPlates();
+  showMessage('');
+  objectsChanged();
+}
+
+const saveProject = withBusy(async () => {
+  const plateIds = state.plates.filter((p) => objectsOn(p.id).length).map((p) => p.id);
+  if (!plateIds.length) return;
+  showMessage('Saving project…');
+  try {
+    const { blob, manifest } = buildProject(plateIds);
+    const { bytes } = await engine.exportProject(settingLayers(), blob, manifest);
+    const name = safeName(state.projectName || objectsOn(plateIds[0])[0]?.name || 'project') + '.3mf';
+    downloadBytes(bytes, name, 'model/3mf');
+    showMessage(`Saved ${name}. Open it here with "Open project…", or in desktop OrcaSlicer.`);
+  } catch (error) {
+    showMessage(`Saving the project failed: ${errorText(error)}`, 'error');
+  }
+});
+
+const openProject = withBusy(async (file) => {
+  if (state.objects.length && !confirm('Open this project? The models currently on your plates will be replaced.')) return;
+  showMessage(`Opening ${file.name}…`);
+  let project;
+  try {
+    project = await readProjectFile(new Uint8Array(await file.arrayBuffer()), viewer.bed);
+  } catch (error) {
+    showMessage(`${file.name}: ${errorText(error)}`, 'error');
+    return;
+  }
+  const notes = [];
+  if (project.config) notes.push(...await applyProjectSettings(project.config));
+  else notes.push('This file has no saved print settings, so your current printer and settings are used.');
+  state.projectName = file.name.replace(/\.(gcode\.)?3mf$/i, '');
+  resetPlates();
+  state.plates = [];
+  state.nextPlate = 1;
+  const plateIds = project.plates.map((p) => addPlate(p.name).id);
+  const items = itemsFromProject(project, (i) => plateIds[i] || plateIds[0]);
+  for (const item of items) addItem(item);
+  setActivePlate(plateIds.find((id) => objectsOn(id).length) || plateIds[0]);
+  viewer.resetCamera();
+  const mods = items.reduce((n, i) => n + i.modifiers.length, 0);
+  const summary = `Opened ${file.name}: ${items.length} model${items.length === 1 ? '' : 's'}`
+    + (plateIds.length > 1 ? ` on ${plateIds.length} plates` : '')
+    + (mods ? `, ${mods} support box${mods === 1 ? '' : 'es'}` : '') + '.';
+  showMessage([summary, ...notes, ...project.warnings].join('\n'));
+  settingsChanged();
+});
+
+/** Select the project's presets where this site has them, and keep its other values as changes. */
+async function applyProjectSettings(config) {
+  const notes = [];
+  const want = {
+    printer: first(config.printer_settings_id),
+    process: first(config.print_settings_id),
+    filament: first(config.filament_settings_id),
+  };
+  const names = await loadNames();
+  let vendorName = state.vendor.vendor;
+  const machineFile = want.printer && names.machine?.[want.printer];
+  if (machineFile) {
+    const slug = machineFile.split('/')[0];
+    const v = state.index.vendors.find((x) => x.index.split('/')[0] === slug);
+    if (v) vendorName = v.name;
+  }
+  const filamentValue = (n) => {
+    if (!n) return null;
+    if (state.vendor && (state.vendor.filaments || []).some((f) => f.name === n)) return n;
+    if (state.library.filaments.some((f) => f.name === n)) return 'lib:' + n;
+    return null;
+  };
+  await selectVendor(vendorName, { printer: machineFile ? want.printer : ui.printerSelect.value, restoring: true });
+  if (want.process && [...ui.processSelect.options].some((o) => o.value === want.process)) {
+    ui.processSelect.value = want.process;
+    await selectProcess(want.process, true);
+  }
+  const fv = filamentValue(want.filament);
+  if (fv && [...ui.filamentSelect.options].some((o) => o.value === fv)) {
+    ui.filamentSelect.value = fv;
+    await selectFilament(fv, true);
+  }
+  const missing = [];
+  if (want.printer && ui.printerSelect.value !== want.printer) missing.push(`printer "${want.printer}"`);
+  if (want.process && state.processName !== want.process) missing.push(`print profile "${want.process}"`);
+  if (want.filament && state.filamentName !== want.filament) missing.push(`filament "${want.filament}"`);
+  if (missing.length) notes.push(`This site has no ${missing.join(', ')}; the closest selection is used and the project's values are kept as changes.`);
+
+  state.overrides = {};
+  for (const [key, raw] of Object.entries(config)) {
+    if (METADATA_KEYS.has(key) || raw === null || typeof raw === 'object' && !Array.isArray(raw)) continue;
+    const base = baseValue(key);
+    let value = raw;
+    if (Array.isArray(value) && Array.isArray(base) && value.length > base.length) value = value.slice(0, Math.max(1, base.length));
+    if (base === undefined && !state.keyTab.has(key)) continue;
+    setOverride(key, value);
+  }
+  const bed = first(config.curr_bed_type);
+  if (bed && BED_TYPES.some((b) => b.value === bed)) ui.bedTypeSelect.value = bed;
+  const n = Object.keys(state.overrides).length;
+  if (n) notes.push(`${n} setting${n === 1 ? '' : 's'} from the project differ from the selected profiles; see Advanced settings.`);
+  return notes;
+}
+
+// ------------------------------------------------------- settings editor --
+
+let editor = null;
+
+async function initEditor() {
+  try {
+    const res = await fetch('settings-schema.json');
+    if (!res.ok) throw new Error(String(res.status));
+    state.schema = await res.json();
+    state.keyTab = keyTabs(state.schema);
+  } catch {
+    ui.advBtn.hidden = true;
+    return;
+  }
+  editor = new SettingsEditor(ui.advPanel, state.schema, {
+    base: baseValue,
+    override: (key) => state.overrides[key],
+    set: (key, value) => setOverride(key, value),
+    onChange: () => settingsChanged(),
+    otherCount: () => Object.keys(state.overrides).filter((k) => !state.keyTab.has(k)).length,
+    clearOther: () => { for (const k of Object.keys(state.overrides)) if (!state.keyTab.has(k)) delete state.overrides[k]; },
+  });
+  ui.advPanel.addEventListener('close', () => ui.advBtn.focus());
 }
 
 // ----------------------------------------------------------------- wiring --
 
 ui.vendorSelect.onchange = withBusy(() => selectVendor(ui.vendorSelect.value));
 ui.printerSelect.onchange = withBusy(() => selectPrinter(ui.printerSelect.value));
-ui.processSelect.onchange = withBusy(() => selectProcess(ui.processSelect.value));
-ui.filamentSelect.onchange = withBusy(() => selectFilament(ui.filamentSelect.value));
-ui.bedTypeSelect.onchange = () => { invalidate(); save(); };
-for (const el of [ui.qLayer, ui.qInfill, ui.qWalls, ui.qSupport, ui.qBrim]) el.addEventListener('change', () => { invalidate(); save(); });
-ui.resetQuick.onclick = () => { fillQuick(null); invalidate(); save(); };
+ui.processSelect.onchange = withBusy(async () => { await selectProcess(ui.processSelect.value); editor?.render(); });
+ui.filamentSelect.onchange = withBusy(async () => { await selectFilament(ui.filamentSelect.value); editor?.render(); });
+ui.bedTypeSelect.onchange = () => { invalidateAll(); save(); };
+for (const el of [ui.qLayer, ui.qInfill, ui.qWalls, ui.qSupport, ui.qBrim]) el.addEventListener('change', quickChanged);
+ui.resetQuick.onclick = () => {
+  for (const k of ['layer_height', 'sparse_infill_density', 'wall_loops', 'enable_support', 'support_type', 'brim_type']) delete state.overrides[k];
+  settingsChanged();
+  editor?.render();
+};
 ui.importPreset.onclick = () => ui.presetFile.click();
 ui.presetFile.onchange = withBusy(async () => { await importPresets(ui.presetFile.files); ui.presetFile.value = ''; });
+ui.advBtn.onclick = () => (editor?.isOpen ? editor.close() : editor?.open());
 
 ui.modelFile.accept = ACCEPTED_EXTENSIONS;
 ui.addBtn.onclick = () => ui.modelFile.click();
-ui.modelFile.onchange = withBusy(async () => { await addFiles(ui.modelFile.files); ui.modelFile.value = ''; invalidate(); });
+ui.modelFile.onchange = withBusy(async () => { await addFiles(ui.modelFile.files); ui.modelFile.value = ''; objectsChanged(); });
 ui.arrangeBtn.onclick = () => arrange('arrange');
 ui.orientBtn.onclick = () => arrange('auto-orient');
 ui.rotX.onclick = () => rotateSelected(new THREE.Vector3(1, 0, 0));
@@ -814,18 +1411,47 @@ ui.rotZ.onclick = () => rotateSelected(new THREE.Vector3(0, 0, 1));
 ui.scaleInput.onchange = () => scaleSelected(parseFloat(ui.scaleInput.value));
 ui.dupBtn.onclick = duplicateSelected;
 ui.delBtn.onclick = deleteSelected;
-ui.sliceBtn.onclick = slice;
+ui.sliceBtn.onclick = () => slice(false);
+ui.sliceAllBtn.onclick = () => slice(true);
 ui.cancelBtn.onclick = () => state.slicing && state.slicing.cancel();
 ui.downloadBtn.onclick = download;
+ui.downloadAllBtn.onclick = downloadAll;
 ui.tabPrepare.onclick = () => setTab('prepare');
-ui.tabPreview.onclick = () => { if (!ui.tabPreview.disabled) setTab('preview'); };
+ui.tabPreview.onclick = async () => {
+  if (ui.tabPreview.disabled) return;
+  await showPreview(state.activePlate);
+  setTab('preview');
+};
 ui.layerSlider.oninput = updateLayerLabel;
 ui.aboutBtn.onclick = () => ui.aboutDialog.showModal();
 
+ui.addPlateBtn.onclick = () => { const p = addPlate(); setActivePlate(p.id); };
+ui.delPlateBtn.onclick = deletePlate;
+ui.objPlate.onchange = () => moveSelectedToPlate(ui.objPlate.value);
+ui.addEnforcer.onclick = () => addModifier('support-enforcer');
+ui.addBlocker.onclick = () => addModifier('support-blocker');
+for (const inp of [ui.modX, ui.modY, ui.modZ, ui.modW, ui.modD, ui.modH]) inp.addEventListener('change', editModifier);
+ui.modDelete.onclick = deleteModifier;
+
+ui.newBtn.onclick = newProject;
+ui.openBtn.onclick = () => ui.projectFile.click();
+ui.projectFile.onchange = async () => {
+  const f = ui.projectFile.files[0];
+  ui.projectFile.value = '';
+  if (f) await openProject(f);
+};
+ui.saveBtn.onclick = saveProject;
+
 viewer.addEventListener('select', () => objectsChanged());
-viewer.addEventListener('move', (e) => { if (!e.detail.live) { objectsChanged(); invalidate(); } });
+viewer.addEventListener('move', (e) => {
+  if (e.detail.live) return;
+  const item = state.objects.find((o) => o.id === e.detail.id);
+  if (item) invalidatePlate(item.plateId);
+  objectsChanged();
+});
 
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && editor?.isOpen) { editor.close(); return; }
   if (e.target.closest('input, select, textarea') || viewer.mode !== 'prepare') return;
   if (e.key === 'Delete' || e.key === 'Backspace') { deleteSelected(); e.preventDefault(); }
 });
@@ -838,7 +1464,7 @@ ui.viewport.addEventListener('drop', withBusy(async (e) => {
   ui.viewport.classList.remove('dragover');
   if (viewer.mode !== 'prepare') setTab('prepare');
   await addFiles(e.dataTransfer.files);
-  invalidate();
+  objectsChanged();
 }));
 window.addEventListener('dragover', (e) => e.preventDefault());
 window.addEventListener('drop', (e) => e.preventDefault());
@@ -846,6 +1472,7 @@ window.addEventListener('drop', (e) => e.preventDefault());
 // ------------------------------------------------------------------- boot --
 
 (async () => {
+  resetPlates();
   updateButtons();
   startEngine();
   try {
@@ -854,6 +1481,7 @@ window.addEventListener('drop', (e) => e.preventDefault());
     ui.sourceLink.textContent = cfg.sourceUrl || 'github.com/Hiosdra/OrcaWeb';
     if (cfg.title) document.title = cfg.title;
   } catch { /* optional */ }
+  await initEditor();
   try {
     await initProfiles();
     ui.aboutVersions.textContent = `Profile library: OrcaSlicer ${state.index.orcaProfileVersion || ''} · ` +

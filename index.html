@@ -20,6 +20,12 @@
       <span>Orca Web Slicer</span>
     </div>
     <div class="topbar-right">
+      <div class="project-actions">
+        <button id="newBtn" class="ghost" type="button" title="Start over with an empty plate">New</button>
+        <button id="openBtn" class="ghost" type="button" title="Open an OrcaSlicer project (.3mf) with its plates and settings">Open project…</button>
+        <button id="saveBtn" class="ghost" type="button" title="Save all plates and settings as an OrcaSlicer project (.3mf)" disabled>Save project</button>
+        <input id="projectFile" type="file" accept=".3mf" hidden>
+      </div>
       <span id="engineStatus" class="pill pill-wait" title="Slicing engine status">Engine loading…</span>
       <button id="aboutBtn" class="ghost" type="button">About</button>
     </div>
@@ -63,8 +69,11 @@
             </select>
           </label>
         </div>
+        <button id="advBtn" class="adv-open" type="button" aria-controls="advPanel">
+          <span>Advanced settings…</span><span id="advCount" class="adv-count"></span>
+        </button>
         <div class="row-actions">
-          <button id="resetQuick" class="link" type="button">Reset to profile values</button>
+          <button id="resetQuick" class="link" type="button">Reset quick settings</button>
           <button id="importPreset" class="link" type="button">Import OrcaSlicer preset…</button>
           <input id="presetFile" type="file" accept=".json,application/json" multiple hidden>
         </div>
@@ -73,11 +82,13 @@
 
       <section class="panel slice-panel">
         <button id="sliceBtn" class="primary big" type="button" disabled>Slice plate</button>
+        <button id="sliceAllBtn" class="secondary" type="button" hidden>Slice all plates</button>
         <div id="progress" class="progress" hidden>
           <div class="progress-bar"><div id="progressFill"></div></div>
           <div class="progress-row"><span id="progressText">Starting…</span><button id="cancelBtn" class="link" type="button">Cancel</button></div>
         </div>
         <div id="result" class="result" hidden>
+          <p id="rPlate" class="result-plate" hidden></p>
           <dl>
             <div><dt>Print time</dt><dd id="rTime">–</dd></div>
             <div><dt>Filament</dt><dd id="rFilament">–</dd></div>
@@ -85,6 +96,7 @@
           <button id="downloadBtn" class="primary" type="button">Download G-code</button>
           <p class="hint" id="rNote"></p>
         </div>
+        <button id="downloadAllBtn" class="secondary" type="button" hidden>Download all plates (.zip)</button>
         <p id="message" class="message" role="status" hidden></p>
       </section>
     </aside>
@@ -98,16 +110,22 @@
         <div class="tools" id="prepareTools">
           <button id="addBtn" type="button" class="primary">Add model</button>
           <input id="modelFile" type="file" multiple hidden>
-          <button id="arrangeBtn" type="button" title="Arrange all models on the plate">Arrange</button>
-          <button id="orientBtn" type="button" title="Let OrcaSlicer pick the best orientation for every model">Auto-orient</button>
+          <button id="arrangeBtn" type="button" title="Arrange the models on this plate">Arrange</button>
+          <button id="orientBtn" type="button" title="Let OrcaSlicer pick the best orientation for every model on this plate">Auto-orient</button>
           <span class="sep"></span>
           <button id="rotX" type="button" class="icon" title="Rotate selected 90° around X">X↻</button>
           <button id="rotY" type="button" class="icon" title="Rotate selected 90° around Y">Y↻</button>
           <button id="rotZ" type="button" class="icon" title="Rotate selected 90° around Z">Z↻</button>
-          <label class="scale" title="Scale selected model"><input id="scaleInput" type="number" min="1" max="2000" step="5" value="100"><span>%</span></label>
+          <label class="scale" title="Scale selected model"><input id="scaleInput" type="number" min="1" max="2000" step="5" value="100" aria-label="Scale (%)"><span>%</span></label>
           <button id="dupBtn" type="button" title="Duplicate selected">Copy</button>
           <button id="delBtn" type="button" title="Delete selected">Delete</button>
         </div>
+      </div>
+
+      <div class="platebar" id="plateBar">
+        <div id="plateList" class="plate-list" role="tablist" aria-label="Plates"></div>
+        <button id="addPlateBtn" type="button" class="icon" title="Add a plate">+ Plate</button>
+        <button id="delPlateBtn" type="button" class="link" title="Delete this plate">Delete plate</button>
       </div>
 
       <div id="viewport" class="viewport">
@@ -115,6 +133,35 @@
           <p><strong>Drop STL, 3MF, OBJ or STEP files here</strong></p>
           <p>or use <em>Add model</em>. Files stay on this computer.</p>
         </div>
+
+        <div id="objPanel" class="obj-panel" hidden>
+          <div class="obj-head"><strong id="objName"></strong></div>
+          <label class="field inline"><span>Plate</span><select id="objPlate"></select></label>
+          <div class="obj-section">
+            <span class="obj-label">Support boxes</span>
+            <div class="mod-add">
+              <button id="addEnforcer" type="button" class="mod-btn support-enforcer" title="Supports are always generated inside this box (when supports are on)">+ Enforcer</button>
+              <button id="addBlocker" type="button" class="mod-btn support-blocker" title="No supports are generated inside this box">+ Blocker</button>
+            </div>
+            <div id="modList" class="mod-list"></div>
+            <div id="modEdit" class="mod-edit" hidden>
+              <div class="mod-edit-head"><span id="modTitle"></span><button id="modDelete" type="button" class="link">Remove</button></div>
+              <p class="hint">Millimetres, measured on the model itself.</p>
+              <div class="mod-grid">
+                <span></span><span>X</span><span>Y</span><span>Z</span>
+                <span>Center</span>
+                <input id="modX" type="number" step="1" aria-label="Center X">
+                <input id="modY" type="number" step="1" aria-label="Center Y">
+                <input id="modZ" type="number" step="1" aria-label="Center Z">
+                <span>Size</span>
+                <input id="modW" type="number" step="1" min="0.5" aria-label="Width">
+                <input id="modD" type="number" step="1" min="0.5" aria-label="Depth">
+                <input id="modH" type="number" step="1" min="0.5" aria-label="Height">
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div id="layerControls" class="layer-controls" hidden>
           <input id="layerSlider" type="range" min="1" max="1" value="1" aria-label="Layer">
           <span id="layerLabel">Layer 1</span>
@@ -127,6 +174,8 @@
         <span id="selectionInfo" class="hint"></span>
       </div>
     </section>
+
+    <aside id="advPanel" class="adv" aria-label="Advanced settings" hidden></aside>
   </main>
 
   <dialog id="aboutDialog">

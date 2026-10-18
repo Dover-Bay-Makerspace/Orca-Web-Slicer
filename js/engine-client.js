@@ -58,14 +58,21 @@ export class EngineClient {
     return this.#call('arrange', { layers, blob: copy, manifest, operation }, [copy]);
   }
 
-  /** Returns { promise, cancel }. */
-  slice(layers, blob, manifest, plateId, onProgress) {
+  /** Slice one or more plates. Returns { promise, cancel }. */
+  slice(layers, blob, manifest, plateIds, onProgress) {
     const copy = blob.slice().buffer;
-    const promise = this.#call('slice', { layers, blob: copy, manifest, plateId }, [copy], onProgress);
+    const promise = this.#call('slice', { layers, blob: copy, manifest, plateIds }, [copy], onProgress);
     const id = promise.requestId;
     return {
       promise,
       cancel: () => this.#call('cancel', { target: id }),
     };
+  }
+
+  /** OrcaSlicer project (.3mf) bytes for the whole plate set. */
+  async exportProject(layers, blob, manifest) {
+    const copy = blob.slice().buffer;
+    const result = await this.#call('exportProject', { layers, blob: copy, manifest }, [copy]);
+    return { bytes: new Uint8Array(result.bytes), skipped: result.skipped };
   }
 }
