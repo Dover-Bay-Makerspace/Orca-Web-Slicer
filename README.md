@@ -139,6 +139,11 @@ Hover over the pill to see the full error message.
   says so. Adding a .3mf
   with **Add model** brings in just its models. Use **Open project…** to also
   load its plates and settings.
+- **Turning models:** select a model, then use **Rotate** (or press R) and
+  drag the red, green or blue ring. It turns in 5° steps; hold Shift for 1°.
+  You can also type exact angles in the model's panel, or use **+90**.
+  **Lay flat** (F) puts whichever flat face you click down on the bed.
+  Esc goes back to moving models.
 - **Settings:** changes in Advanced settings are remembered in that browser.
   Picking a different printer, filament or print profile clears the changes
   for that part only, like switching presets in the desktop app.

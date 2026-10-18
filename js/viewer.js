@@ -52,6 +52,8 @@ export class Viewer extends EventTarget {
     this.raycaster = new THREE.Raycaster();
     this.pointer = new THREE.Vector2();
     this.drag = null;
+    this.tool = 'move'; // 'move' | 'rotate' (drag the rings) | 'layflat' (click a face)
+    this.#buildGizmo();
     this.#bindPointer();
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -67,7 +69,7 @@ export class Viewer extends EventTarget {
     this.needsRender = true;
     for (const name of ['applyTheme', 'resize', 'setBed', 'resetCamera', 'addObject', 'addModifier', 'updateModifier',
       'removeModifier', 'applyPlateVisibility', 'removeObject', 'updateObject', 'refreshColors', 'select', 'setMode',
-      'setPreview', 'setPreviewMode', 'setFeatureHidden', 'showLayers', 'clearPreview', 'frame', 'frameModels']) {
+      'setPreview', 'setPreviewMode', 'setFeatureHidden', 'showLayers', 'clearPreview', 'frame', 'frameModels', 'setTool']) {
       const original = this[name].bind(this);
       this[name] = (...args) => {
         const result = original(...args);
@@ -244,6 +246,7 @@ export class Viewer extends EventTarget {
 
   applyPlateVisibility() {
     for (const o of this.objects.values()) o.mesh.visible = !this.activePlate || o.item.plateId === this.activePlate;
+    this.#placeGizmo();
   }
 
   removeObject(id) {
@@ -263,6 +266,7 @@ export class Viewer extends EventTarget {
     o.mesh.matrix.copy(instanceMatrix(item, o.mesh.geometry));
     o.mesh.matrixWorldNeedsUpdate = true;
     this.refreshColors();
+    if (!this.drag?.rotate) this.#placeGizmo();
   }
 
   /** World-space bounds of a model itself (support boxes are not part of it). */
@@ -313,7 +317,91 @@ export class Viewer extends EventTarget {
     this.selectedId = id;
     this.selectedModifierId = id ? modifierId : null;
     this.refreshColors();
+    this.#placeGizmo();
     this.dispatchEvent(new CustomEvent('select', { detail: { id, modifierId: this.selectedModifierId } }));
+  }
+
+  // ------------------------------------------------- rotate / lay flat ----
+
+  /** Pick the model tool: 'move', 'rotate' or 'layflat'. */
+  setTool(tool) {
+    this.tool = tool;
+    this.renderer.domElement.style.cursor = tool === 'layflat' ? 'crosshair' : '';
+    this.#placeGizmo();
+    this.dispatchEvent(new CustomEvent('tool', { detail: { tool } }));
+  }
+
+  #buildGizmo() {
+    // Three rings, like OrcaSlicer's rotate tool: red turns around X, green
+    // around Y, blue around Z. Each has a thicker invisible copy that is
+    // easier to grab.
+    this.gizmo = new THREE.Group();
+    this.gizmo.visible = false;
+    this.gizmoRings = [];
+    const axes = { x: [new THREE.Vector3(1, 0, 0), 0xe5484d], y: [new THREE.Vector3(0, 1, 0), 0x3fb45b], z: [new THREE.Vector3(0, 0, 1), 0x3d8ef0] };
+    for (const [name, [axis, colour]] of Object.entries(axes)) {
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(1, 0.02, 8, 128),
+        new THREE.MeshBasicMaterial({ color: colour, depthTest: false, transparent: true, opacity: 0.95 }));
+      const grab = new THREE.Mesh(new THREE.TorusGeometry(1, 0.075, 6, 64),
+        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthTest: false, depthWrite: false, colorWrite: false }));
+      for (const m of [ring, grab]) {
+        if (name === 'x') m.rotation.y = Math.PI / 2;
+        if (name === 'y') m.rotation.x = Math.PI / 2;
+        m.renderOrder = 10;
+      }
+      grab.userData.axis = name;
+      ring.raycast = () => {};
+      this.gizmo.add(ring, grab);
+      this.gizmoRings.push({ name, axis, colour, ring, grab });
+    }
+    this.scene.add(this.gizmo);
+    this.hud = document.createElement('div');
+    this.hud.className = 'rotate-hud';
+    this.hud.hidden = true;
+    this.container.appendChild(this.hud);
+  }
+
+  #placeGizmo() {
+    if (!this.gizmo) return;
+    const o = this.selectedId && this.objects.get(this.selectedId);
+    const show = !!o && o.mesh.visible && this.tool === 'rotate' && this.mode === 'prepare' && !this.selectedModifierId;
+    this.gizmo.visible = show;
+    if (!show) return;
+    const box = this.worldBox(this.selectedId);
+    const size = box.getSize(new THREE.Vector3());
+    box.getCenter(this.gizmo.position);
+    this.gizmo.scale.setScalar(Math.max(8, 0.5 * Math.hypot(size.x, size.y, size.z) + 4));
+  }
+
+  #highlightRing(name) {
+    for (const r of this.gizmoRings) {
+      r.ring.material.color.setHex(r.name === name ? 0xffd23f : r.colour);
+      r.ring.scale.setScalar(1);
+      r.ring.geometry.dispose();
+      r.ring.geometry = new THREE.TorusGeometry(1, r.name === name ? 0.035 : 0.02, 8, 128);
+    }
+    this.hoverRing = name;
+    this.needsRender = true;
+  }
+
+  /** Angle of the pointer around the gizmo centre on screen (radians, counter-clockwise). */
+  #screenAngle(event) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const c = this.gizmo.position.clone().project(this.camera);
+    const cx = rect.left + (c.x + 1) / 2 * rect.width;
+    const cy = rect.top + (1 - c.y) / 2 * rect.height;
+    return Math.atan2(-(event.clientY - cy), event.clientX - cx);
+  }
+
+  /** Lay the clicked face of a model flat on the bed. */
+  #layFlat(hit) {
+    const o = this.objects.get(hit.object.userData.id);
+    if (!o || !hit.face) return;
+    const n = hit.face.normal.clone().applyMatrix3(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize();
+    const q = new THREE.Quaternion().setFromUnitVectors(n, new THREE.Vector3(0, 0, -1));
+    o.item.quaternion.premultiply(q).normalize();
+    this.updateObject(o.item);
+    this.dispatchEvent(new CustomEvent('move', { detail: { id: o.item.id, live: false, rotated: true } }));
   }
 
   // ------------------------------------------------------- pointer ----
@@ -336,9 +424,35 @@ export class Viewer extends EventTarget {
     el.addEventListener('pointerdown', (event) => {
       if (event.button !== 0 || this.mode !== 'prepare') return;
       this.#pick(event);
+      downAt = { x: event.clientX, y: event.clientY };
+      if (this.gizmo.visible) {
+        const ringHit = this.raycaster.intersectObjects(this.gizmoRings.map((r) => r.grab), false)[0];
+        if (ringHit) {
+          const r = this.gizmoRings.find((x) => x.name === ringHit.object.userData.axis);
+          const item = this.objects.get(this.selectedId).item;
+          // Turning direction follows the side of the ring facing the camera.
+          const facing = Math.sign(r.axis.dot(this.camera.position.clone().sub(this.gizmo.position))) || 1;
+          this.drag = {
+            rotate: r, id: item.id, q0: item.quaternion.clone(), last: this.#screenAngle(event), total: 0, facing,
+            pointerId: event.pointerId, moved: false,
+          };
+          this.#highlightRing(r.name);
+          this.controls.enabled = false;
+          el.setPointerCapture(event.pointerId);
+          return;
+        }
+      }
       const visible = this.modelGroup.children.filter((m) => m.visible);
       const hits = this.raycaster.intersectObjects(visible, true).filter((h) => h.object.userData.id);
-      downAt = { x: event.clientX, y: event.clientY };
+      if (hits.length && this.tool === 'layflat') {
+        const hit = hits.find((h) => !h.object.userData.modifierId);
+        if (hit) {
+          if (hit.object.userData.id !== this.selectedId) this.select(hit.object.userData.id);
+          this.#layFlat(hit);
+          downAt = null;
+          return;
+        }
+      }
       if (hits.length) {
         // Prefer a support box when the click passes through one.
         const hit = hits.find((h) => h.object.userData.modifierId) || hits[0];
@@ -355,7 +469,41 @@ export class Viewer extends EventTarget {
       }
     });
     el.addEventListener('pointermove', (event) => {
-      if (!this.drag) return;
+      if (this.drag?.rotate) {
+        const d = this.drag;
+        const a = this.#screenAngle(event);
+        let step = a - d.last;
+        if (step > Math.PI) step -= 2 * Math.PI;
+        if (step < -Math.PI) step += 2 * Math.PI;
+        d.last = a;
+        d.total += step * d.facing;
+        // Snaps to 5° steps; hold Shift for 1°.
+        const snap = event.shiftKey ? 1 : 5;
+        const deg = Math.round(THREE.MathUtils.radToDeg(d.total) / snap) * snap;
+        const o = this.objects.get(d.id);
+        if (!o) return;
+        o.item.quaternion.copy(d.q0).premultiply(new THREE.Quaternion().setFromAxisAngle(d.rotate.axis, THREE.MathUtils.degToRad(deg))).normalize();
+        d.moved = true;
+        d.deg = deg;
+        this.updateObject(o.item);
+        const rect = this.renderer.domElement.getBoundingClientRect();
+        this.hud.textContent = `${d.rotate.name.toUpperCase()} ${deg > 0 ? '+' : ''}${deg}°`;
+        this.hud.style.left = `${event.clientX - rect.left + 16}px`;
+        this.hud.style.top = `${event.clientY - rect.top + 12}px`;
+        this.hud.hidden = false;
+        this.dispatchEvent(new CustomEvent('move', { detail: { id: o.item.id, live: true, rotated: true } }));
+        return;
+      }
+      if (!this.drag) {
+        if (this.gizmo.visible && event.buttons === 0) {
+          this.#pick(event);
+          const h = this.raycaster.intersectObjects(this.gizmoRings.map((r) => r.grab), false)[0];
+          const name = h ? h.object.userData.axis : null;
+          if (name !== this.hoverRing) this.#highlightRing(name);
+          el.style.cursor = name ? 'grab' : '';
+        }
+        return;
+      }
       this.#pick(event);
       const p = this.#bedPoint();
       if (!p) return;
@@ -368,6 +516,18 @@ export class Viewer extends EventTarget {
       this.dispatchEvent(new CustomEvent('move', { detail: { id: o.item.id, live: true } }));
     });
     const end = (event) => {
+      if (this.drag?.rotate) {
+        const { id, moved } = this.drag;
+        try { el.releasePointerCapture(this.drag.pointerId); } catch { /* already released */ }
+        this.drag = null;
+        this.controls.enabled = true;
+        this.hud.hidden = true;
+        this.#highlightRing(null);
+        this.#placeGizmo();
+        if (moved) this.dispatchEvent(new CustomEvent('move', { detail: { id, live: false, rotated: true } }));
+        downAt = null;
+        return;
+      }
       if (this.drag) {
         const moved = this.drag.moved;
         const id = this.drag.id;
@@ -391,6 +551,7 @@ export class Viewer extends EventTarget {
     this.mode = mode;
     this.modelGroup.visible = mode === 'prepare';
     this.previewGroup.visible = mode === 'preview';
+    this.#placeGizmo();
   }
 
   /**

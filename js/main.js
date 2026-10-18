@@ -30,7 +30,7 @@ const ui = Object.fromEntries([
   'qLayer', 'qInfill', 'qWalls', 'qSupport', 'qBrim', 'resetQuick', 'importPreset', 'presetFile', 'advBtn', 'advCount',
   'advPanel', 'sliceBtn', 'sliceAllBtn', 'progress', 'progressFill', 'progressText', 'cancelBtn', 'result', 'rPlate',
   'rTime', 'rFilament', 'downloadBtn', 'downloadAllBtn', 'rNote', 'message', 'tabPrepare', 'tabPreview', 'prepareTools',
-  'addBtn', 'modelFile', 'arrangeBtn', 'orientBtn', 'rotX', 'rotY', 'rotZ', 'scaleInput', 'dupBtn', 'delBtn', 'viewport',
+  'addBtn', 'modelFile', 'arrangeBtn', 'orientBtn', 'rotX', 'rotY', 'rotZ', 'rotateTool', 'layFlatTool', 'rotXDeg', 'rotYDeg', 'rotZDeg', 'rotReset', 'scaleInput', 'dupBtn', 'delBtn', 'viewport',
   'dropHint', 'layerControls', 'layerSlider', 'layerLabel', 'legend', 'objectBar', 'objectList', 'selectionInfo',
   'fitBtn', 'plateBar', 'plateList', 'addPlateBtn', 'delPlateBtn', 'objPanel', 'objName', 'objPlate', 'addEnforcer', 'addBlocker',
   'modList', 'modEdit', 'modTitle', 'modX', 'modY', 'modZ', 'modW', 'modD', 'modH', 'modDelete',
@@ -1242,6 +1242,41 @@ function rotateSelected(axis) {
   objectsChanged();
 }
 
+/** Set the selected model's rotation from the X/Y/Z degree boxes in its panel. */
+function setRotationFromInputs() {
+  const item = selected();
+  if (!item) return;
+  const deg = [ui.rotXDeg, ui.rotYDeg, ui.rotZDeg].map((i) => parseFloat(i.value) || 0);
+  const e = new THREE.Euler(...deg.map((d) => THREE.MathUtils.degToRad(d)), 'XYZ');
+  item.quaternion.setFromEuler(e);
+  viewer.updateObject(item);
+  invalidatePlate(item.plateId);
+  objectsChanged();
+}
+
+function resetRotation() {
+  const item = selected();
+  if (!item) return;
+  item.quaternion.identity();
+  viewer.updateObject(item);
+  invalidatePlate(item.plateId);
+  objectsChanged();
+}
+
+function renderRotation(item) {
+  const e = new THREE.Euler().setFromQuaternion(item.quaternion, 'XYZ');
+  const out = [e.x, e.y, e.z].map((r) => {
+    let d = Math.round(THREE.MathUtils.radToDeg(r) * 10) / 10;
+    if (Object.is(d, -0) || Math.abs(d) < 0.05) d = 0;
+    return d;
+  });
+  [ui.rotXDeg, ui.rotYDeg, ui.rotZDeg].forEach((inp, i) => { if (document.activeElement !== inp) inp.value = String(out[i]); });
+}
+
+function setTool(tool) {
+  viewer.setTool(viewer.tool === tool ? 'move' : tool);
+}
+
 function scaleSelected(percent) {
   const item = selected();
   if (!item || !Number.isFinite(percent) || percent <= 0) return;
@@ -1379,6 +1414,7 @@ function renderObjectPanel() {
   ui.objFilament.value = String(item.filament);
   ui.objFilament.parentElement.parentElement.hidden = state.slots.length < 2;
   ui.objSwatch.style.background = state.slots[item.filament - 1]?.colour || '#999';
+  renderRotation(item);
   const mod = selectedModifier();
   ui.modList.replaceChildren(...item.modifiers.map((m, i) => {
     const b = document.createElement('button');
@@ -1770,7 +1806,9 @@ function updateButtons() {
   ui.openBtn.disabled = busy;
   const r = state.results.get(state.activePlate);
   ui.tabPreview.disabled = !r || r.stale;
-  for (const b of [ui.rotX, ui.rotY, ui.rotZ, ui.dupBtn, ui.delBtn, ui.scaleInput]) b.disabled = !sel || busy;
+  for (const b of [ui.rotX, ui.rotY, ui.rotZ, ui.rotXDeg, ui.rotYDeg, ui.rotZDeg, ui.rotReset, ui.dupBtn, ui.delBtn, ui.scaleInput]) b.disabled = !sel || busy;
+  const hasModels = state.objects.some((o) => o.plateId === state.activePlate);
+  for (const b of [ui.rotateTool, ui.layFlatTool]) b.disabled = !hasModels || busy;
 }
 
 // --------------------------------------------------------------- projects --
@@ -1963,6 +2001,10 @@ ui.addBtn.onclick = () => ui.modelFile.click();
 ui.modelFile.onchange = withBusy(async () => { await addFiles(ui.modelFile.files); ui.modelFile.value = ''; objectsChanged(); });
 ui.arrangeBtn.onclick = () => arrange('arrange');
 ui.orientBtn.onclick = () => arrange('auto-orient');
+ui.rotateTool.onclick = () => setTool('rotate');
+ui.layFlatTool.onclick = () => setTool('layflat');
+for (const inp of [ui.rotXDeg, ui.rotYDeg, ui.rotZDeg]) inp.addEventListener('change', setRotationFromInputs);
+ui.rotReset.onclick = resetRotation;
 ui.rotX.onclick = () => rotateSelected(new THREE.Vector3(1, 0, 0));
 ui.rotY.onclick = () => rotateSelected(new THREE.Vector3(0, 1, 0));
 ui.rotZ.onclick = () => rotateSelected(new THREE.Vector3(0, 0, 1));
@@ -2026,9 +2068,18 @@ ui.projectFile.onchange = async () => {
 };
 ui.saveBtn.onclick = saveProject;
 
+// Handy for debugging in the browser console (and used by the tests).
+window.orcaWeb = { viewer, state };
 viewer.addEventListener('select', () => objectsChanged());
+viewer.addEventListener('tool', (e) => {
+  ui.rotateTool.setAttribute('aria-pressed', String(e.detail.tool === 'rotate'));
+  ui.layFlatTool.setAttribute('aria-pressed', String(e.detail.tool === 'layflat'));
+});
 viewer.addEventListener('move', (e) => {
-  if (e.detail.live) return;
+  if (e.detail.live) {
+    if (e.detail.rotated) { const item = selected(); if (item) renderRotation(item); }
+    return;
+  }
   const item = state.objects.find((o) => o.id === e.detail.id);
   if (item) invalidatePlate(item.plateId);
   objectsChanged();
@@ -2038,6 +2089,10 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && editor?.isOpen) { editor.close(); return; }
   if (e.target.closest('input, select, textarea') || viewer.mode !== 'prepare') return;
   if (e.key === 'Delete' || e.key === 'Backspace') { deleteSelected(); e.preventDefault(); }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === 'r' || e.key === 'R') setTool('rotate');
+  if (e.key === 'f' || e.key === 'F') setTool('layflat');
+  if (e.key === 'Escape' && viewer.tool !== 'move') viewer.setTool('move');
 });
 
 // Drag and drop files onto the 3D view.

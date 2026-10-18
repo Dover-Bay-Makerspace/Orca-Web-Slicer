@@ -479,6 +479,68 @@ try {
     await dctx.close();
   }
 
+  // Rotate rings, typed angles and lay flat.
+  {
+    const rctx = await browser.newContext({ viewport: { width: 1400, height: 860 } });
+    const rp = await rctx.newPage();
+    rp.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
+    await rp.goto(`http://localhost:${port}/`);
+    await rp.waitForFunction(() => document.getElementById('engineStatus').textContent.includes('ready'));
+    await rp.setInputFiles('#modelFile', [path.join(models, 'tall-box.stl')]);
+    await rp.waitForFunction(() => document.querySelectorAll('#objectList li').length === 1);
+    await rp.click('#objectList li button');
+    const dims = () => rp.$eval('#selectionInfo', (e) => (/([\d.]+) × ([\d.]+) × ([\d.]+)/.exec(e.textContent) || []).slice(1).map(Number));
+    await rp.fill('#rotZDeg', '45');
+    await rp.dispatchEvent('#rotZDeg', 'change');
+    const d45 = await dims();
+    check('typed 45° turns the model', Math.abs(d45[0] - 35.4) < 0.2 && Math.abs(d45[1] - 35.4) < 0.2 && d45[2] === 40, d45.join(' × '));
+    await rp.click('#rotReset');
+    check('Reset puts the rotation back', (await dims()).join(',') === '20,30,40' && (await rp.inputValue('#rotZDeg')) === '0');
+    await rp.keyboard.press('r');
+    check('R turns on the rotate tool', (await rp.getAttribute('#rotateTool', 'aria-pressed')) === 'true'
+      && await rp.evaluate(() => window.orcaWeb.viewer.gizmo.visible));
+    // Drag the blue (Z) ring a quarter of the way round.
+    const ring = await rp.evaluate(() => {
+      const v = window.orcaWeb.viewer;
+      const rect = v.renderer.domElement.getBoundingClientRect();
+      const g = v.gizmo;
+      const pts = [];
+      for (let a = 0; a <= 60; a += 6) {
+        const p = g.position.clone().add(new g.position.constructor(Math.cos(a * Math.PI / 180), Math.sin(a * Math.PI / 180), 0).multiplyScalar(g.scale.x)).project(v.camera);
+        pts.push([rect.left + (p.x + 1) / 2 * rect.width, rect.top + (1 - p.y) / 2 * rect.height]);
+      }
+      return pts;
+    });
+    await rp.mouse.move(...ring[0]);
+    await rp.mouse.down();
+    for (const pt of ring.slice(1)) await rp.mouse.move(...pt, { steps: 2 });
+    const hud = await rp.$eval('.rotate-hud', (e) => (e.hidden ? '' : e.textContent));
+    await rp.mouse.up();
+    const z = +(await rp.inputValue('#rotZDeg'));
+    check('dragging the Z ring turns the model in 5° steps', z > 20 && z < 90 && z % 5 === 0 && /^Z \+\d+°$/.test(hud), `${z}° / hud "${hud}"`);
+    check('ring drag keeps the model upright', (await dims())[2] === 40 && +(await rp.inputValue('#rotXDeg')) === 0);
+    await rp.screenshot({ path: path.join(OUT, '13-rotate-rings.png') });
+    await rp.click('#rotReset');
+    await rp.keyboard.press('f');
+    check('F turns on lay flat (rings hidden)', (await rp.getAttribute('#layFlatTool', 'aria-pressed')) === 'true'
+      && !(await rp.evaluate(() => window.orcaWeb.viewer.gizmo.visible)));
+    // Click the side of the tall box: that side goes down on the bed.
+    const side = await rp.evaluate(() => {
+      const v = window.orcaWeb.viewer;
+      const id = [...v.objects.keys()][0];
+      const b = v.worldBox(id);
+      const rect = v.renderer.domElement.getBoundingClientRect();
+      const p = b.getCenter(b.min.clone()).setY(b.min.y).project(v.camera);
+      return [rect.left + (p.x + 1) / 2 * rect.width, rect.top + (1 - p.y) / 2 * rect.height];
+    });
+    await rp.mouse.click(...side);
+    const flat = await dims();
+    check('lay flat puts the clicked face on the bed', flat[2] === 30 && flat.includes(40), flat.join(' × '));
+    await rp.keyboard.press('Escape');
+    check('Escape goes back to moving models', (await rp.getAttribute('#layFlatTool', 'aria-pressed')) === 'false');
+    await rctx.close();
+  }
+
   // Save a changed printer as a preset file, then publish it (with another
   // custom printer) through the custom-printers folder.
   {

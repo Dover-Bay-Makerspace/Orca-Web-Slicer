@@ -127,9 +127,8 @@
           <button id="arrangeBtn" type="button" title="Arrange the models on this plate">Arrange</button>
           <button id="orientBtn" type="button" title="Let OrcaSlicer pick the best orientation for every model on this plate">Auto-orient</button>
           <span class="sep"></span>
-          <button id="rotX" type="button" class="icon" title="Rotate selected 90° around X">X↻</button>
-          <button id="rotY" type="button" class="icon" title="Rotate selected 90° around Y">Y↻</button>
-          <button id="rotZ" type="button" class="icon" title="Rotate selected 90° around Z">Z↻</button>
+          <button id="rotateTool" type="button" class="tool-toggle" aria-pressed="false" title="Rotate: drag the coloured rings around the selected model, or type angles in its panel (R)">⟳ Rotate</button>
+          <button id="layFlatTool" type="button" class="tool-toggle" aria-pressed="false" title="Lay flat: click a flat face of a model to put that face down on the bed (F)">⊥ Lay flat</button>
           <label class="scale" title="Scale selected model"><input id="scaleInput" type="number" min="1" max="2000" step="5" value="100" aria-label="Scale (%)"><span>%</span></label>
           <button id="dupBtn" type="button" title="Duplicate selected">Copy</button>
           <button id="delBtn" type="button" title="Delete selected">Delete</button>
@@ -152,6 +151,15 @@
           <div class="obj-head"><strong id="objName"></strong></div>
           <label class="field inline"><span>Plate</span><select id="objPlate"></select></label>
           <div><label class="field inline"><span>Filament</span><i id="objSwatch" class="obj-swatch"></i><select id="objFilament"></select></label></div>
+          <div class="obj-section" id="rotSection">
+            <div class="obj-label-row"><span class="obj-label">Rotation (degrees)</span><button id="rotReset" type="button" class="link">Reset</button></div>
+            <div class="rot-grid">
+              <span class="axis-x">X</span><input id="rotXDeg" type="number" step="5" aria-label="Rotation around X in degrees"><button id="rotX" type="button" class="icon" title="Turn 90° around X">+90</button>
+              <span class="axis-y">Y</span><input id="rotYDeg" type="number" step="5" aria-label="Rotation around Y in degrees"><button id="rotY" type="button" class="icon" title="Turn 90° around Y">+90</button>
+              <span class="axis-z">Z</span><input id="rotZDeg" type="number" step="5" aria-label="Rotation around Z in degrees"><button id="rotZ" type="button" class="icon" title="Turn 90° around Z">+90</button>
+            </div>
+            <p id="rotHint" class="hint">Tip: <b>Rotate</b> shows rings to drag (5° steps, hold Shift for 1°). <b>Lay flat</b> puts the face you click on the bed.</p>
+          </div>
           <div class="obj-section">
             <span class="obj-label">Support boxes</span>
             <div class="mod-add">
