@@ -567,3 +567,6 @@ fieldset.field { border: 1px solid var(--border); border-radius: 8px; padding: 6
 .other-downloads-label { margin: 10px 0 4px; font-size: 12px; color: var(--muted); }
 .other-downloads { display: flex; gap: 6px; }
 .other-downloads button.secondary { flex: 1; width: auto; padding: 6px 8px; font-size: 13px; }
+.result-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.result-head .result-plate { margin: 0; }
+.result-head #backBtn { margin-left: auto; width: auto; padding: 0; font-size: 13px; }

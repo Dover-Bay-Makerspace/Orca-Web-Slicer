@@ -724,7 +724,15 @@ try {
     // The workstation project is the main result and carries the pauses (OrcaSlicer / Bambu Studio format).
     check('"Save for the workstation" is the main button after slicing', await op.isVisible('#workstationBtn')
       && (await op.getAttribute('#workstationBtn', 'class')).includes('primary') && (await op.getAttribute('#downloadBtn', 'class')).includes('secondary'));
+    await op.click('#backBtn');
+    check('"Back to editing" closes the result and returns to Prepare', await op.isHidden('#result')
+      && (await op.getAttribute('#tabPrepare', 'aria-selected')) === 'true');
+    await op.click('#tabPreview');
+    check('the Preview tab brings the result back', await op.isVisible('#workstationBtn'));
     const [wd] = await Promise.all([op.waitForEvent('download'), op.click('#workstationBtn')]);
+    await op.waitForTimeout(200);
+    check('saving for the workstation closes the result', await op.isHidden('#result')
+      && (await op.getAttribute('#tabPrepare', 'aria-selected')) === 'true');
     const wPath = path.join(OUT, 'workstation.3mf');
     await wd.saveAs(wPath);
     const wz = unzip(fs.readFileSync(wPath));

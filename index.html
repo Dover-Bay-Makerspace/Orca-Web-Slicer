@@ -107,7 +107,10 @@
           <div class="progress-row"><span id="progressText">Starting…</span><button id="cancelBtn" class="link" type="button">Cancel</button></div>
         </div>
         <div id="result" class="result" hidden>
-          <p id="rPlate" class="result-plate" hidden></p>
+          <div class="result-head">
+            <p id="rPlate" class="result-plate" hidden></p>
+            <button id="backBtn" class="link" type="button" title="Close the result and go back to the models (Esc)">← Back to editing</button>
+          </div>
           <dl>
             <div><dt>Print time</dt><dd id="rTime">–</dd></div>
             <div><dt>Filament</dt><dd id="rFilament">–</dd></div>

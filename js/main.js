@@ -34,7 +34,7 @@ const ui = Object.fromEntries([
   'objFilament', 'objSwatch', 'rBreakdown', 'download3mfBtn',
   'qLayer', 'qInfill', 'qWalls', 'qSupport', 'qBrim', 'qAdaptive', 'resetQuick', 'importPreset', 'presetFile', 'advBtn', 'advCount',
   'advPanel', 'sliceBtn', 'sliceAllBtn', 'progress', 'progressFill', 'progressText', 'cancelBtn', 'result', 'rPlate',
-  'rTime', 'rFilament', 'workstationBtn', 'downloadBtn', 'downloadAllBtn', 'rNote', 'message', 'tabPrepare', 'tabPreview', 'prepareTools',
+  'rTime', 'rFilament', 'workstationBtn', 'backBtn', 'downloadBtn', 'downloadAllBtn', 'rNote', 'message', 'tabPrepare', 'tabPreview', 'prepareTools',
   'addBtn', 'modelFile', 'arrangeBtn', 'orientBtn', 'rotX', 'rotY', 'rotZ', 'sizeX', 'sizeY', 'sizeZ', 'sizeLock', 'mirX', 'mirY', 'mirZ', 'splitBtn', 'rotateTool', 'layFlatTool', 'paintTool', 'paintBar', 'paintColours', 'paintErase',
   'paintBrushMode', 'paintFillMode', 'paintSize', 'paintSizeText', 'paintAngle', 'paintAngleText', 'paintSizeRow',
   'paintAngleRow', 'paintUndo', 'paintRedo', 'paintClear', 'paintHint', 'undoBtn', 'redoBtn', 'supportTool', 'supportAutoRow',
@@ -2613,9 +2613,12 @@ async function showPreview(plateId) {
 
 function renderResult() {
   const r = state.results.get(state.activePlate);
-  ui.result.hidden = !r;
+  // The result belongs to the Preview tab: going back to Prepare closes it
+  // (the Preview tab brings it back while the slice is still up to date).
+  const showing = viewer.mode === 'preview';
+  ui.result.hidden = !r || !showing;
   const fresh = [...state.results.entries()].filter(([id, x]) => !x.stale && state.plates.some((p) => p.id === id));
-  ui.downloadAllBtn.hidden = fresh.length < 2;
+  ui.downloadAllBtn.hidden = fresh.length < 2 || !showing;
   ui.downloadAllBtn.textContent = `Download all ${fresh.length} plates (.zip)`;
   if (!r) return;
   const st = r.statistics || {};
@@ -2760,6 +2763,7 @@ function setTab(tab) {
   renderMarkers();
   ui.legend.hidden = !preview;
   objectsChanged();
+  renderResult();
 }
 
 function updateButtons() {
@@ -2928,6 +2932,8 @@ const saveProject = withBusy(async () => {
     bytes = marks.bytes;
     const name = safeName(state.projectName || objectsOn(plateIds[0])[0]?.name || 'project') + '.3mf';
     downloadBytes(bytes, name, 'model/3mf');
+    // Saved: close the result and go back to the models.
+    if (viewer.mode === 'preview') setTab('prepare');
     showMessage(`Saved ${name}. Open it in OrcaSlicer or Bambu Studio on the workstation to check the settings and print`
       + (marks.count ? ` (its ${marks.count} pause${marks.count === 1 ? '' : 's'}/colour change${marks.count === 1 ? '' : 's'} are included).` : '.')
       + ' It also opens here with "Open project…".');
@@ -3275,6 +3281,7 @@ ui.projectFile.onchange = async () => {
 };
 ui.saveBtn.onclick = saveProject;
 ui.workstationBtn.onclick = saveProject;
+ui.backBtn.onclick = () => setTab('prepare');
 
 // Handy for debugging in the browser console (and used by the tests).
 window.orcaWeb = { viewer, state };
@@ -3330,6 +3337,7 @@ document.addEventListener('keydown', (e) => {
     if (k === 'y' || (k === 'z' && e.shiftKey)) { redo(); e.preventDefault(); return; }
     if (k === 'z') { undo(); e.preventDefault(); return; }
   }
+  if (e.key === 'Escape' && viewer.mode === 'preview' && !typing && !document.querySelector('dialog[open]')) { setTab('prepare'); return; }
   if (e.target.closest('input, select, textarea') || viewer.mode !== 'prepare') return;
   if (e.key === 'Delete' || e.key === 'Backspace') { deleteSelected(); e.preventDefault(); }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
