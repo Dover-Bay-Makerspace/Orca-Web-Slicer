@@ -286,10 +286,36 @@ def main():
 
     all_vendors = sorted(f[:-5] for f in os.listdir(root)
                          if f.endswith(".json") and os.path.isdir(os.path.join(root, f[:-5])))
-    wanted = [v.strip() for v in args.vendors.split(",") if v.strip()] or all_vendors
-    unknown = [v for v in wanted if v not in all_vendors]
+    # Brand names are matched forgivingly: any capitals, spaces or dashes, and a
+    # few everyday names for folders OrcaSlicer names differently. Unknown names
+    # are skipped with a warning instead of failing the whole build.
+    def norm(text):
+        return re.sub(r"[^a-z0-9]", "", text.lower())
+    aliases = {"bambu": "BBL", "bambulab": "BBL", "bambulabs": "BBL", "prusaresearch": "Prusa",
+               "ratrig": "Ratrig", "lulzbot": "Lulzbot", "ultimaker": "UltiMaker", "qidi": "Qidi",
+               "qiditech": "Qidi", "flashforge": "Flashforge", "bigtreetech": "BIQU", "btt": "BIQU"}
+    by_norm = {norm(v): v for v in all_vendors}
+    requested = [v.strip() for v in re.split(r"[,;\n]", args.vendors) if v.strip()]
+    wanted, unknown = [], []
+    for name in requested:
+        key = norm(name)
+        match = by_norm.get(key) or (aliases.get(key) if aliases.get(key) in all_vendors else None)
+        if not match:
+            starts = [v for k, v in by_norm.items() if k.startswith(key)] if len(key) >= 3 else []
+            match = starts[0] if len(starts) == 1 else None
+        if match:
+            if match not in wanted:
+                wanted.append(match)
+        else:
+            unknown.append(name)
     if unknown:
-        sys.exit(f"unknown vendor(s): {', '.join(unknown)}\navailable: {', '.join(all_vendors)}")
+        print(f"WARNING: skipping unknown printer brand(s): {', '.join(unknown)}", file=sys.stderr)
+        print(f"         available: {', '.join(all_vendors)}", file=sys.stderr)
+    if requested and not [v for v in wanted if v != LIBRARY_VENDOR]:
+        print("WARNING: none of the requested brands matched, so all brands are included.", file=sys.stderr)
+        wanted = []
+    if not wanted:
+        wanted = list(all_vendors)
     if LIBRARY_VENDOR in all_vendors and LIBRARY_VENDOR not in wanted:
         wanted.append(LIBRARY_VENDOR)
 
