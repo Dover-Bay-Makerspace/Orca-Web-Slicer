@@ -382,6 +382,8 @@ export function paintStates(paint) {
  * enforcer / blocker parts): every leaf painted `state` becomes a thin prism
  * `depth` mm either side of the surface. Returns a flat triangle array.
  */
+const GROW = 0.05; // mm
+
 export function paintVolumes(positions, paint, state, depth = 0.4) {
   const out = [];
   const push = (...vs) => { for (const v of vs) out.push(v[0], v[1], v[2]); };
@@ -396,8 +398,18 @@ export function paintVolumes(positions, paint, state, depth = 0.4) {
       const l = Math.hypot(...n);
       if (l < 1e-12) return;
       const d = [n[0] / l * depth, n[1] / l * depth, n[2] / l * depth];
-      const up = (p) => [p[0] + d[0], p[1] + d[1], p[2] + d[2]];
-      const dn = (p) => [p[0] - d[0], p[1] - d[1], p[2] - d[2]];
+      // Each prism is its own closed shell, a little wider than its triangle so
+      // neighbours overlap without sharing corners. (The engine repairs STL
+      // files; prisms sharing corners and walls get merged into one broken
+      // shell that slices to nothing.)
+      const m = [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3];
+      const grow = (p) => {
+        const r = [p[0] - m[0], p[1] - m[1], p[2] - m[2]];
+        const k = 1 + GROW / Math.max(Math.hypot(...r), 1e-9);
+        return [m[0] + r[0] * k, m[1] + r[1] * k, m[2] + r[2] * k];
+      };
+      const up = (p) => { const q = grow(p); return [q[0] + d[0], q[1] + d[1], q[2] + d[2]]; };
+      const dn = (p) => { const q = grow(p); return [q[0] - d[0], q[1] - d[1], q[2] - d[2]]; };
       const [A, B, C] = [up(a), up(b), up(c)];
       const [A2, B2, C2] = [dn(a), dn(b), dn(c)];
       push(A, B, C, A2, C2, B2);

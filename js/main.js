@@ -2040,6 +2040,28 @@ function unitBox() {
   return Float32Array.from(f.flatMap((t) => t.flatMap((i) => v[i])));
 }
 
+/**
+ * A support volume's mesh moved so its bounding box is centred on 0,0,0, and
+ * that centre. The engine centres every support mesh it loads and then sets
+ * its placement from the page, so the page sends centred meshes and puts the
+ * centre into the placement itself (otherwise painted supports land in the
+ * wrong place and do nothing).
+ */
+function centred(vol) {
+  if (vol.centred?.source === vol.positions) return vol.centred;
+  const p = vol.positions;
+  const box = new THREE.Box3();
+  const v = new THREE.Vector3();
+  for (let i = 0; i < p.length; i += 3) box.expandByPoint(v.set(p[i], p[i + 1], p[i + 2]));
+  const centre = box.getCenter(new THREE.Vector3());
+  const positions = new Float32Array(p.length);
+  for (let i = 0; i < p.length; i += 3) {
+    positions[i] = p[i] - centre.x; positions[i + 1] = p[i + 1] - centre.y; positions[i + 2] = p[i + 2] - centre.z;
+  }
+  vol.centred = { source: p, positions, centre, stl: toBinaryStl(positions) };
+  return vol.centred;
+}
+
 function addModifier(role) {
   const item = selected();
   if (!item) return;
@@ -2261,26 +2283,26 @@ function buildProject(plateIds, shift = null, { split = true, onBed = false } = 
         }).filter(Boolean);
       }
       for (const v of item.supportVolumes) {
+        const c = centred(v);
         modifierVolumes.push({
           id: `${item.id}-paint-${v.role}`,
-          meshId: addMesh(v.positions, v, v.stl),
+          meshId: addMesh(c.positions, c, c.stl),
           role: v.role,
           objectId: item.id,
           plateId: item.plateId,
-          transform: { matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] },
+          transform: { matrix: toRowMajor(new THREE.Matrix4().makeTranslation(c.centre.x, c.centre.y, c.centre.z)) },
         });
       }
     }
     for (const mod of item.modifiers) {
-      if (!mod.stl) mod.stl = toBinaryStl(mod.positions);
-      const modMesh = addMesh(mod.positions, mod.positions, mod.stl);
+      const c = centred(mod);
       modifierVolumes.push({
         id: mod.id,
-        meshId: modMesh,
+        meshId: addMesh(c.positions, c, c.stl),
         role: mod.role,
         objectId: item.id,
         plateId: item.plateId,
-        transform: { matrix: toRowMajor(mod.matrix) },
+        transform: { matrix: toRowMajor(mod.matrix.clone().multiply(new THREE.Matrix4().makeTranslation(c.centre.x, c.centre.y, c.centre.z))) },
       });
     }
   }

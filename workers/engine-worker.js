@@ -240,16 +240,17 @@ const handlers = {
     try {
       const plates = [];
       const transfer = [];
-      const collect = async (plate, pkg) => {
+      // Read each plate's G-code straight after slicing: the engine clears
+      // slice results when it does anything else (such as packaging).
+      const collect = async (plate) => {
         const asset = (plate.assets || []).find((a) => a.kind === 'gcode');
         if (!asset) throw Object.assign(new Error('The engine finished but returned no G-code for ' + plate.plateId + '.'), { code: 'NO_DATA' });
         let gcode = await session.getAsset(asset.id);
         if (shift) gcode = unshiftGcode(gcode, shift[0], shift[1], shift[2] || {});
         const entry = { plateId: plate.plateId, gcode: gcode.buffer, statistics: plate.statistics || null };
         transfer.push(gcode.buffer);
-        if (pkg) { entry.package = pkg.buffer; transfer.push(pkg.buffer); }
-        if (pkg === null) entry.packageError = true;
         plates.push(entry);
+        return entry;
       };
       if (!packaged) {
         const result = await sliceSome(plateIds, manifest, 0, 100);
@@ -260,6 +261,8 @@ const handlers = {
         for (let i = 0; i < plateIds.length; i++) {
           const sub = plateManifest(manifest, plateIds[i]);
           const result = await sliceSome([plateIds[i]], sub, (i * 100) / plateIds.length, 100 / plateIds.length);
+          const entries = [];
+          for (const plate of result.plateResults || []) entries.push(await collect(plate));
           let pkg = null;
           try {
             const out = await session.export('project.3mf', { schemaVersion: sub.schemaVersion, preservation: 'portable', includeSliceArtifacts: true });
@@ -267,7 +270,10 @@ const handlers = {
           } catch (error) {
             post({ type: 'log', message: 'packaging failed: ' + (error && error.message) });
           }
-          for (const plate of result.plateResults || []) await collect(plate, pkg);
+          for (const entry of entries) {
+            if (pkg) { entry.package = pkg.buffer.slice(0); transfer.push(entry.package); }
+            else entry.packageError = true;
+          }
         }
       }
       return { transfer, value: { plates, skipped } };

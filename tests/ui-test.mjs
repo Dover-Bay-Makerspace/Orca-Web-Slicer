@@ -943,6 +943,7 @@ try {
     await pg.keyboard.press('Escape');
     const sg = await sliceText(pg);
     check('painted supports reach the engine and switch supports on', sg.includes('support-enforcer') && sg.includes('support-blocker')
+      && sg.includes('; modifier_off_centre = 0')
       && sg.includes('; enable_support = 1') && /support_type = \["?(tree|normal)\(manual\)/.test(sg.replace(/; support_type = (\w)/, '; support_type = ["$1')),
       sg.split('\n').filter((l) => /modifier_volumes|enable_support|support_type/.test(l)).join(' | '));
     await pg.keyboard.press('Control+z');
