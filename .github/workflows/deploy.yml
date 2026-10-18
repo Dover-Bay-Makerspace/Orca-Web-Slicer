@@ -9,6 +9,14 @@
 # One-time setup: repository Settings -> Pages -> Source: "GitHub Actions".
 name: Deploy site
 
+# Printer brands students can pick from. To add a brand, add its name to this
+# line (for example: "Bambu, Snapmaker, Prusa, Creality, Custom") and commit.
+# Leave it empty ("") to include every brand OrcaSlicer supports.
+# "Custom" is OrcaSlicer's generic Klipper/Marlin/RRF printers, a good starting
+# point for home-built printers. Your own printer files go in custom-printers/.
+env:
+  PRINTER_BRANDS: "Bambu, Snapmaker, Prusa, Custom"
+
 on:
   push:
     branches: [main]
@@ -19,7 +27,7 @@ on:
         required: false
         default: ""
       vendors:
-        description: "Printer brands to include, comma-separated (blank = all)"
+        description: "Printer brands for this run only, comma-separated (blank = the PRINTER_BRANDS line in this file)"
         required: false
         default: ""
 
@@ -55,9 +63,11 @@ jobs:
             '/src/libslic3r/PrintConfig.cpp' '/src/slic3r/GUI/Tab.cpp'
 
       - name: Build profile library
+        env:
+          BRANDS: ${{ github.event.inputs.vendors || env.PRINTER_BRANDS }}
         run: |
           python3 tools/build-profiles.py --orca "$RUNNER_TEMP/orca" --out profiles \
-            ${{ github.event.inputs.vendors && format('--vendors "{0}"', github.event.inputs.vendors) || '' }}
+            --vendors "$BRANDS" --custom custom-printers
 
       - name: Build Advanced settings list
         run: python3 tools/build-settings-schema.py --orca "$RUNNER_TEMP/orca" --out settings-schema.json
