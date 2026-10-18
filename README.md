@@ -2,11 +2,23 @@
 
 OrcaSlicer running as a web page for the classroom. Students open a web
 address in Edge or Chrome, add a model, pick a printer, filament and print
-profile, slice, and **download the G-code**. Nothing is installed on student
-computers, no admin rights are needed, and models are never uploaded:
-slicing happens inside the browser on that PC. There is deliberately **no
-printer or network connection**. Students copy the G-code to the printer
-themselves (SD card, USB stick, or the printer's own web page).
+profile, slice to check it, and click **Save for the workstation (.3mf)**.
+They take that project file to the workstation computer, open it in
+OrcaSlicer or Bambu Studio, where the settings are checked, and print from
+there. Nothing is installed on student computers, no admin rights are
+needed, and models are never uploaded: slicing happens inside the browser on
+that PC. There is deliberately **no printer or network connection**.
+Printing straight from the page is still possible with the smaller **G-code**
+and **Bambu (.gcode.3mf)** downloads.
+
+**What the workstation project keeps:** every plate and model (including cut,
+mirrored, text and shape models), the printer, print profile and filaments
+by their desktop preset names plus any changed settings, colour painting,
+painted supports and support boxes (as enforcer/blocker parts), and pauses
+and colour changes (they appear on the desktop layer slider). Not kept:
+adaptive layer height (use the desktop Variable layer height tool) and a
+temperature tower's per-block temperatures. Bambu Studio has no Snapmaker U1,
+so U1 projects need OrcaSlicer on the workstation.
 
 - **Slicing engine:** OrcaSlicer v2.4.2 (latest stable) compiled to
   WebAssembly by the [OrcaWeb](https://github.com/Hiosdra/OrcaWeb) project.
@@ -26,9 +38,8 @@ themselves (SD card, USB stick, or the printer's own web page).
   Bambu H2D you choose the nozzle for each. OrcaSlicer's colour-based purge
   amounts and a prime tower are set up automatically. The preview can colour
   by filament, and the result shows grams per filament.
-- **Bambu printers:** besides plain G-code, **Download for Bambu
-  (.gcode.3mf)** gives the sliced-project file Bambu printers print from an
-  SD card.
+- **Bambu printers:** besides plain G-code, the **Bambu (.gcode.3mf)**
+  download gives the sliced file Bambu printers print from an SD card.
 - **Support enforcers and blockers:** select a model and add boxes that force
   supports, or keep them out, in that area. Set each box's position and size
   in millimetres.
@@ -38,8 +49,9 @@ themselves (SD card, USB stick, or the printer's own web page).
   settings, with the same pages, names and help text as the desktop app, plus
   search. Changed settings are shown in bold and can be reset one at a time.
   Expert-level settings are hidden unless you tick "Show expert settings".
-- **Projects:** **Save project** writes an OrcaSlicer project (.3mf) with every
-  plate, support box and setting. **Open project…** reopens it here, and the
+- **Projects:** **Save project** (the same file as **Save for the
+  workstation**) writes an OrcaSlicer / Bambu Studio project (.3mf) with every
+  plate, support, pause and setting. **Open project…** reopens it here, and the
   file also opens in desktop OrcaSlicer. Projects made in desktop OrcaSlicer or
   Bambu Studio open here too.
 - **Custom presets:** you can import printer, process or filament presets

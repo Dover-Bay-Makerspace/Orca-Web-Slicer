@@ -27,7 +27,7 @@
       <div class="project-actions">
         <button id="newBtn" class="ghost" type="button" title="Start over with an empty plate">New</button>
         <button id="openBtn" class="ghost" type="button" title="Open an OrcaSlicer project (.3mf) with its plates and settings">Open project…</button>
-        <button id="saveBtn" class="ghost" type="button" title="Save all plates and settings as an OrcaSlicer project (.3mf)" disabled>Save project</button>
+        <button id="saveBtn" class="ghost" type="button" title="Save all plates and settings as a project (.3mf) for OrcaSlicer or Bambu Studio" disabled>Save project</button>
         <input id="projectFile" type="file" accept=".3mf" hidden>
       </div>
       <div class="theme-switch" role="group" aria-label="Colour theme" id="themeSwitch">
@@ -113,8 +113,13 @@
             <div><dt>Filament</dt><dd id="rFilament">–</dd></div>
           </dl>
           <ul id="rBreakdown" class="breakdown" hidden></ul>
-          <button id="download3mfBtn" class="primary" type="button" hidden>Download for Bambu (.gcode.3mf)</button>
-          <button id="downloadBtn" class="primary" type="button">Download G-code</button>
+          <button id="workstationBtn" class="primary" type="button">Save for the workstation (.3mf)</button>
+          <p class="hint" id="rWorkstation">Open this file in OrcaSlicer or Bambu Studio on the printer computer to check the settings, then print from there.</p>
+          <p class="other-downloads-label">Or print straight from this file:</p>
+          <div class="other-downloads">
+            <button id="download3mfBtn" class="secondary" type="button" hidden>Bambu (.gcode.3mf)</button>
+            <button id="downloadBtn" class="secondary" type="button">G-code</button>
+          </div>
           <p class="hint" id="rNote"></p>
         </div>
         <button id="downloadAllBtn" class="secondary" type="button" hidden>Download all plates (.zip)</button>

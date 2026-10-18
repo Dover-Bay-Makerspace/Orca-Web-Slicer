@@ -34,7 +34,7 @@ const ui = Object.fromEntries([
   'objFilament', 'objSwatch', 'rBreakdown', 'download3mfBtn',
   'qLayer', 'qInfill', 'qWalls', 'qSupport', 'qBrim', 'qAdaptive', 'resetQuick', 'importPreset', 'presetFile', 'advBtn', 'advCount',
   'advPanel', 'sliceBtn', 'sliceAllBtn', 'progress', 'progressFill', 'progressText', 'cancelBtn', 'result', 'rPlate',
-  'rTime', 'rFilament', 'downloadBtn', 'downloadAllBtn', 'rNote', 'message', 'tabPrepare', 'tabPreview', 'prepareTools',
+  'rTime', 'rFilament', 'workstationBtn', 'downloadBtn', 'downloadAllBtn', 'rNote', 'message', 'tabPrepare', 'tabPreview', 'prepareTools',
   'addBtn', 'modelFile', 'arrangeBtn', 'orientBtn', 'rotX', 'rotY', 'rotZ', 'sizeX', 'sizeY', 'sizeZ', 'sizeLock', 'mirX', 'mirY', 'mirZ', 'splitBtn', 'rotateTool', 'layFlatTool', 'paintTool', 'paintBar', 'paintColours', 'paintErase',
   'paintBrushMode', 'paintFillMode', 'paintSize', 'paintSizeText', 'paintAngle', 'paintAngleText', 'paintSizeRow',
   'paintAngleRow', 'paintUndo', 'paintRedo', 'paintClear', 'paintHint', 'undoBtn', 'redoBtn', 'supportTool', 'supportAutoRow',
@@ -2644,10 +2644,8 @@ function renderResult() {
     ? 'Settings or models changed: slice again to update the G-code.'
     : (skipped.length
       ? `Note: ${skipped.length} setting(s) were not accepted by the engine and were left at their defaults (${skipped.slice(0, 4).map((s) => s.key).join(', ')}${skipped.length > 4 ? ', …' : ''}). `
-      : '') + (r.package
-      ? 'For a Bambu printer, copy the .gcode.3mf file to its SD card. '
-      : r.packageError ? 'The .gcode.3mf package could not be made; the plain G-code is still available. ' : '')
-      + 'Copy the file to your printer (SD card, USB stick or its own upload page).';
+      : '') + (r.packageError ? 'The .gcode.3mf package could not be made; the plain G-code is still available.' : '');
+  ui.rNote.hidden = !ui.rNote.textContent;
 }
 
 function outputName(plateId) {
@@ -2782,6 +2780,7 @@ function updateButtons() {
   ui.arrangeBtn.disabled = !state.engineReady || !onPlate || busy;
   ui.orientBtn.disabled = !state.engineReady || !onPlate || busy;
   ui.saveBtn.disabled = !state.engineReady || !anyObjects || busy;
+  ui.workstationBtn.disabled = ui.saveBtn.disabled;
   ui.newBtn.disabled = busy;
   ui.openBtn.disabled = busy;
   const r = state.results.get(state.activePlate);
@@ -2924,14 +2923,75 @@ const saveProject = withBusy(async () => {
   showMessage('Saving project…');
   try {
     const { blob, manifest } = buildProject(plateIds);
-    const { bytes } = await engine.exportProject(settingLayers(), blob, manifest);
+    let { bytes } = await engine.exportProject(settingLayers(), blob, manifest);
+    const marks = await addProjectMarkers(new Uint8Array(bytes), plateIds);
+    bytes = marks.bytes;
     const name = safeName(state.projectName || objectsOn(plateIds[0])[0]?.name || 'project') + '.3mf';
     downloadBytes(bytes, name, 'model/3mf');
-    showMessage(`Saved ${name}. Open it here with "Open project…", or in desktop OrcaSlicer.`);
+    showMessage(`Saved ${name}. Open it in OrcaSlicer or Bambu Studio on the workstation to check the settings and print`
+      + (marks.count ? ` (its ${marks.count} pause${marks.count === 1 ? '' : 's'}/colour change${marks.count === 1 ? '' : 's'} are included).` : '.')
+      + ' It also opens here with "Open project…".');
   } catch (error) {
     showMessage(`Saving the project failed: ${errorText(error)}`, 'error');
   }
 });
+
+/**
+ * Pauses and colour changes go into the project as desktop OrcaSlicer /
+ * Bambu Studio keep them (Metadata/custom_gcode_per_layer.xml), so they show
+ * on the layer slider there and print the printer's own way.
+ */
+async function addProjectMarkers(bytes, plateIds) {
+  const plates = plateIds.map((id, i) => [i + 1, state.markers.get(id) || []]).filter(([, list]) => list.length);
+  const count = plates.reduce((n, [, list]) => n + list.length, 0);
+  if (!count) return { bytes, count };
+  const m = effectiveMachine();
+  const mode = state.slots.length < 2 ? 'SingleExtruder' : isSharedNozzle(m) ? 'MultiAsSingle' : 'MultiExtruder';
+  const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  const pause = String(first(m.machine_pause_gcode) || '');
+  const xml = ['<?xml version="1.0" encoding="utf-8"?>', '<custom_gcodes_per_layer>'];
+  for (const [index, list] of plates) {
+    xml.push('<plate>', `<plate_info id="${index}"/>`);
+    for (const mk of list) {
+      // OrcaSlicer's types: 0 = colour change, 1 = pause.
+      const colour = mk.type === 'pause' ? '' : (state.slots[0]?.colour?.toUpperCase() === '#FFFFFF' ? '#2B2B2B' : '#FFFFFF');
+      xml.push(`<layer top_z="${+mk.z.toFixed(4)}" type="${mk.type === 'pause' ? 1 : 0}" extruder="1" color="${colour}" extra="" gcode="${esc(mk.type === 'pause' ? pause : '')}"/>`);
+    }
+    xml.push(`<mode value="${mode}"/>`, '</plate>');
+  }
+  xml.push('</custom_gcodes_per_layer>');
+  try {
+    const files = (await readZip(bytes)).filter((f) => f.name !== 'Metadata/custom_gcode_per_layer.xml');
+    files.push({ name: 'Metadata/custom_gcode_per_layer.xml', data: new TextEncoder().encode(xml.join('\n')) });
+    return { bytes: makeZip(files), count };
+  } catch (error) {
+    console.warn('project markers', error);
+    return { bytes, count: 0 };
+  }
+}
+
+/** Pauses and colour changes saved in a project, by plate number: Map(1 → [{ z, type }]). */
+async function readProjectMarkers(bytes) {
+  const out = new Map();
+  try {
+    const f = (await readZip(bytes)).find((x) => x.name === 'Metadata/custom_gcode_per_layer.xml');
+    if (!f) return out;
+    const doc = new DOMParser().parseFromString(new TextDecoder().decode(f.data), 'application/xml');
+    for (const plate of doc.querySelectorAll('plate')) {
+      const id = Number(plate.querySelector('plate_info')?.getAttribute('id'));
+      const list = [];
+      for (const l of plate.querySelectorAll('layer')) {
+        const z = Number(l.getAttribute('top_z'));
+        const type = Number(l.getAttribute('type') ?? (l.getAttribute('gcode') === 'M600' ? 0 : 1));
+        if (Number.isFinite(z) && (type === 0 || type === 1)) list.push({ z, type: type === 1 ? 'pause' : 'colour' });
+      }
+      if (id > 0 && list.length) out.set(id, list);
+    }
+  } catch (error) {
+    console.warn('project markers', error);
+  }
+  return out;
+}
 
 const openProject = withBusy(async (file) => {
   if (state.objects.length && !confirm('Open this project? The models currently on your plates will be replaced.')) return;
@@ -2951,6 +3011,17 @@ const openProject = withBusy(async (file) => {
   state.plates = [];
   state.nextPlate = 1;
   const plateIds = project.plates.map((p) => addPlate(p.name).id);
+  const saved = await readProjectMarkers(new Uint8Array(await file.arrayBuffer()));
+  if (saved.size) {
+    const lh = parseFloat(first(effective('layer_height'))) || 0.2;
+    const first1 = parseFloat(first(effective('initial_layer_print_height'))) || lh;
+    for (const [n, list] of saved) {
+      if (!plateIds[n - 1]) continue;
+      state.markers.set(plateIds[n - 1], list.map((mk) => ({ ...mk, layer: Math.max(1, Math.round((mk.z - first1) / lh)) })).sort((a, b) => a.z - b.z));
+    }
+    const k = [...saved.values()].reduce((a, l) => a + l.length, 0);
+    notes.push(`${k} pause${k === 1 ? '' : 's'}/colour change${k === 1 ? '' : 's'} from the project will be added when you slice.`);
+  }
   const needed = Math.max(1, ...project.objects.flatMap((o) => (o.colourParts || [o]).map((c) => c.filament || 1)),
     ...project.objects.flatMap((o) => [...paintStates(new Map(o.paint || []))]));
   if (needed > state.slots.length) {
@@ -3203,6 +3274,7 @@ ui.projectFile.onchange = async () => {
   if (f) await openProject(f);
 };
 ui.saveBtn.onclick = saveProject;
+ui.workstationBtn.onclick = saveProject;
 
 // Handy for debugging in the browser console (and used by the tests).
 window.orcaWeb = { viewer, state };

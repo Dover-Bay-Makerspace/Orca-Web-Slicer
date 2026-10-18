@@ -562,3 +562,8 @@ fieldset.field { border: 1px solid var(--border); border-radius: 8px; padding: 6
 }
 #cutBar input.num-small { width: 80px; flex: none; }
 #cutBar .paint-row:first-child { flex-wrap: nowrap; }
+
+/* After slicing: the workstation project is the main result; G-code is the alternative. */
+.other-downloads-label { margin: 10px 0 4px; font-size: 12px; color: var(--muted); }
+.other-downloads { display: flex; gap: 6px; }
+.other-downloads button.secondary { flex: 1; width: auto; padding: 6px 8px; font-size: 13px; }

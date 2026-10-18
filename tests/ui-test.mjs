@@ -721,6 +721,20 @@ try {
     const ci = lines.findIndex((l) => l.startsWith('; COLOR_CHANGE'));
     check('pause and colour change are in the G-code at their layers', pi > 0 && lines[pi + 1] === 'M601' && ci > pi && lines[ci + 1] === 'M600'
       && lines[pi - 1].startsWith(';Z:') && lines[ci - 1].startsWith(';Z:'), [lines[pi - 1], lines[pi], lines[pi + 1], lines[ci - 1], lines[ci + 1]].join(' | '));
+    // The workstation project is the main result and carries the pauses (OrcaSlicer / Bambu Studio format).
+    check('"Save for the workstation" is the main button after slicing', await op.isVisible('#workstationBtn')
+      && (await op.getAttribute('#workstationBtn', 'class')).includes('primary') && (await op.getAttribute('#downloadBtn', 'class')).includes('secondary'));
+    const [wd] = await Promise.all([op.waitForEvent('download'), op.click('#workstationBtn')]);
+    const wPath = path.join(OUT, 'workstation.3mf');
+    await wd.saveAs(wPath);
+    const wz = unzip(fs.readFileSync(wPath));
+    const cg = (wz['Metadata/custom_gcode_per_layer.xml'] || '').toString();
+    check('workstation project includes the pause and colour change', wd.suggestedFilename().endsWith('.3mf')
+      && /<plate_info id="1"\/>/.test(cg) && /type="1"[^>]*gcode="M601"/.test(cg) && /type="0"/.test(cg) && /<mode value="SingleExtruder"\/>/.test(cg), cg.slice(0, 400));
+    await op.click('#newBtn');
+    await op.setInputFiles('#projectFile', wPath);
+    await op.waitForFunction(() => document.querySelectorAll('#objectList li').length > 0, null, { timeout: 15000 });
+    check('opening the project brings its pauses back', /2 pauses\/colour changes/.test(await msg(op)), await msg(op));
     await octx.close();
 
     // Bambu: thumbnail picture and pause inside the .gcode.3mf.
