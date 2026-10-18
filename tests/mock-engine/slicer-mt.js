@@ -30,7 +30,8 @@ var OneSlicerEngine = (function () {
   Session.prototype.init = async function (bytes) {
     var j = JSON.parse(decoder.decode(bytes));
     if (typeof j !== 'object') throw err('CONFIG', 'config must be an object');
-    this.config = j;
+    // Like the real bridge: absolute E unless a profile layer says otherwise.
+    this.config = Object.assign({ use_relative_e_distances: '0', gcode_flavor: 'marlin', before_layer_change_gcode: '', layer_change_gcode: '' }, j);
   };
   Session.prototype.applyProfile = async function (format, bytes) {
     if (format !== 'orca.profile-json' && format !== 'orca.native-json') throw err('UNSUPPORTED', 'bad format ' + format);
@@ -77,6 +78,21 @@ var OneSlicerEngine = (function () {
     var cfg = this.config, self = this;
     var lh = parseFloat(Array.isArray(cfg.layer_height) ? cfg.layer_height[0] : cfg.layer_height) || 0.2;
     var mf = this.project.manifest, blob = this.project.blob;
+    // OrcaSlicer's Print::validate() extruder-addressing check.
+    var anyRe = /^[ \t]*[gG]92[ \t]*[eE](0(\.0*)?|\.0+)[ \t]*(;.*)?$/m, exactRe = /^[ \t]*G92[ \t]*E(0(\.0*)?|\.0+)[ \t]*(;.*)?$/m;
+    var one = function (v) { return Array.isArray(v) ? v[0] : v; };
+    var before = String(one(cfg.before_layer_change_gcode) || ''), layerG = String(one(cfg.layer_change_gcode) || '');
+    var bbl = /Bambu Lab/.test(String(one(cfg.printer_model) || ''));
+    if (String(one(cfg.use_relative_e_distances)) === '1') {
+      if (/^marlin2?$/.test(String(one(cfg.gcode_flavor))) && !bbl && !exactRe.test(before) && !exactRe.test(layerG))
+        throw err('VALIDATION', 'Relative extruder addressing requires resetting the extruder position at each layer to prevent loss of floating point accuracy. Add "G92 E0" to layer_gcode.');
+    } else if (anyRe.test(before)) {
+      throw err('VALIDATION', '"G92 E0" was found in before_layer_change_gcode, which is incompatible with absolute extruder addressing.');
+    } else if (anyRe.test(layerG)) {
+      throw err('VALIDATION', '"G92 E0" was found in layer_change_gcode, which is incompatible with absolute extruder addressing.');
+    }
+    if (String(one(cfg.enable_prime_tower)) === '1' && String(one(cfg.use_relative_e_distances)) !== '1' && (cfg.filament_colour || []).length > 1)
+      throw err('VALIDATION', 'The prime tower requires relative extruder addressing.');
     var insts = mf.instances.filter(function (i) { return i.plateId === plateId; });
     if (!insts.length) throw err('EMPTY_INPUT', 'selected project plate contains no objects');
     var boxes = insts.map(function (inst) {
@@ -87,6 +103,15 @@ var OneSlicerEngine = (function () {
       return b;
     }).sort(function (a, b) { return a.tool - b.tool; });
     var mass = [];
+    // Like the real bridge: the bed is taken as 0..max of printable_area.
+    var area = cfg.printable_area || ['0x0', '256x0', '256x256', '0x256'];
+    if (typeof area === 'string') area = area.split(',');
+    var bmx = Math.max.apply(null, area.map(function (p) { return +p.split(/x/i)[0]; }));
+    var bmy = Math.max.apply(null, area.map(function (p) { return +p.split(/x/i)[1]; }));
+    boxes.forEach(function (b, i) {
+      if (b.min[0] < -1e-3 || b.min[1] < -1e-3 || b.max[0] > bmx + 1e-3 || b.max[1] > bmy + 1e-3)
+        throw err('VALIDATION', 'project instance ' + i + ' is outside the configured printable bed');
+    });
     var mods = mf.modifierVolumes.filter(function (m) { return m.plateId === plateId; });
     var top = Math.max.apply(null, boxes.map(function (b) { return b.max[2] - Math.min(0, b.min[2]); }));
     var layers = Math.max(1, Math.round(top / lh));
@@ -105,8 +130,11 @@ var OneSlicerEngine = (function () {
       '; filament_type = ' + JSON.stringify(cfg.filament_type),
       '; flush_volumes_matrix_len = ' + (cfg.flush_volumes_matrix ? cfg.flush_volumes_matrix.length : 0),
       '; enable_prime_tower = ' + cfg.enable_prime_tower, '; use_relative_e_distances = ' + cfg.use_relative_e_distances,
+      '; before_layer_change_gcode = ' + JSON.stringify(cfg.before_layer_change_gcode),
       '; object_tools = ' + boxes.map(function (b) { return b.tool; }).join(','),
       'G90', 'M83', 'G28', 'G1 Z5 F3000'];
+    var start = one(cfg.machine_start_gcode);
+    if (start) out.push(String(start));
     var e = 0;
     for (var L = 0; L < layers; L++) {
       if (options && options.signal && options.signal.aborted) throw err('CANCELLED', 'cancelled');

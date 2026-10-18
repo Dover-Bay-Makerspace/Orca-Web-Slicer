@@ -367,6 +367,73 @@ try {
     await mctx.close();
   }
 
+  // ---- one printer from every brand slices (catches profile/validation mismatches)
+  {
+    const bctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+    const bp = await bctx.newPage();
+    bp.on('dialog', (d) => d.accept());
+    await bp.goto(`http://localhost:${port}/`);
+    await bp.waitForFunction(() => document.getElementById('engineStatus').textContent.includes('ready'), null, { timeout: 20000 });
+    await bp.waitForFunction(() => document.getElementById('printerSelect').options.length > 0);
+    await bp.setInputFiles('#modelFile', [path.join(models, 'tall-box.stl')]);
+    await bp.waitForFunction(() => document.querySelectorAll('#objectList li').length === 1);
+    const vendors = await bp.$$eval('#vendorSelect option', (o) => o.map((x) => x.value));
+    const failures = [];
+    for (const v of vendors) {
+      await bp.selectOption('#vendorSelect', v);
+      await bp.waitForFunction(() => !document.getElementById('vendorSelect').disabled, null, { timeout: 10000 }).catch(() => {});
+      await bp.waitForTimeout(250);
+      await bp.$eval('#message', (e) => { e.hidden = true; e.textContent = ''; });
+      await bp.click('#sliceBtn');
+      const ok = await bp.waitForFunction(() => {
+        const r = document.getElementById('result');
+        const m = document.getElementById('message');
+        return (!r.hidden && !r.classList.contains('stale')) || /failed/i.test(m.textContent);
+      }, null, { timeout: 20000 }).then(() => true).catch(() => false);
+      const m = await msg(bp);
+      if (!ok || /failed/i.test(m)) failures.push(`${v} / ${await bp.$eval('#printerSelect', (x) => x.value)}: ${m || 'timeout'}`);
+      await bp.click('#tabPrepare').catch(() => {});
+    }
+    check(`a printer from each of ${vendors.length} brands slices`, failures.length === 0, failures.slice(0, 3).join(' | '));
+    await bctx.close();
+  }
+
+  // ---- printer whose bed doesn't start at 0,0 (Flashforge Adventurer 5M: -110…110)
+  {
+    const fctx = await browser.newContext({ viewport: { width: 1200, height: 800 }, acceptDownloads: true });
+    const fp = await fctx.newPage();
+    fp.on('dialog', (d) => d.accept());
+    await fp.goto(`http://localhost:${port}/`);
+    await fp.waitForFunction(() => document.getElementById('engineStatus').textContent.includes('ready'), null, { timeout: 20000 });
+    await fp.waitForFunction(() => document.getElementById('printerSelect').options.length > 0);
+    await fp.selectOption('#vendorSelect', 'Flashforge');
+    await fp.waitForTimeout(400);
+    await fp.selectOption('#printerSelect', 'Flashforge Adventurer 5M 0.4 Nozzle');
+    await fp.waitForTimeout(400);
+    await fp.setInputFiles('#modelFile', [path.join(models, 'tall-box.stl')]);
+    await fp.waitForFunction(() => document.querySelectorAll('#objectList li').length === 1);
+    check('offset bed: model lands inside the bed', !(await fp.$eval('#objectList button', (b) => b.className)).includes('outside'));
+    await fp.click('#advBtn');
+    await fp.click('.adv-tabs .tab[data-tab="machine"]');
+    await fp.click('.adv-page:has-text("Machine G-code")');
+    await fp.fill('#adv-machine_start_gcode', 'G1 X-100 Y-100 ; corner\nBED_MESH_CALIBRATE MESH_MIN={first_layer_print_min[0]},{first_layer_print_min[1]}');
+    await fp.dispatchEvent('#adv-machine_start_gcode', 'change');
+    await fp.keyboard.press('Escape');
+    await fp.click('#sliceBtn');
+    await fp.waitForSelector('#result:not([hidden])', { timeout: 20000 });
+    const [fd] = await Promise.all([fp.waitForEvent('download'), fp.click('#downloadBtn')]);
+    const fpth = path.join(OUT, 'ad5m.gcode');
+    await fd.saveAs(fpth);
+    const ft = fs.readFileSync(fpth, 'utf8');
+    const xs = [...ft.matchAll(/^G1 X(-?[\d.]+) Y(-?[\d.]+) E/gm)].map((m) => [+m[1], +m[2]]);
+    const cxg = xs.reduce((a, p) => a + p[0], 0) / xs.length, cyg = xs.reduce((a, p) => a + p[1], 0) / xs.length;
+    check('offset bed: model printed at the bed centre in printer coordinates', Math.abs(cxg) < 15 && Math.abs(cyg) < 20, `centre ${cxg.toFixed(1)}, ${cyg.toFixed(1)}`);
+    check('offset bed: printer start G-code left as written', ft.includes('G1 X-100 Y-100 ; corner'));
+    check('offset bed: position placeholders corrected', ft.includes('(first_layer_print_min[0] - 110)') && ft.includes('(first_layer_print_min[1] - 110)'));
+    check('offset bed: no internal markers left in the G-code', !ft.includes('OWS_RAW'));
+    await fctx.close();
+  }
+
   // ---- presets + persistence
   await page.setInputFiles('#presetFile', path.join(OUT, 'my-mk3s.json'));
   await page.waitForFunction(() => [...document.querySelectorAll('#printerSelect option')].some((o) => o.value === 'user:My MK3S (classroom)'), null, { timeout: 5000 });

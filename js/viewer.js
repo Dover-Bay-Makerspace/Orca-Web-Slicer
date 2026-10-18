@@ -44,7 +44,7 @@ export class Viewer extends EventTarget {
     this.selectedModifierId = null;
     this.activePlate = null;
     this.mode = 'prepare';
-    this.bed = { width: 256, depth: 256, height: 250, shape: 'rectangle' };
+    this.bed = { x0: 0, y0: 0, width: 256, depth: 256, height: 250, shape: 'rectangle' };
 
     this.raycaster = new THREE.Raycaster();
     this.pointer = new THREE.Vector2();
@@ -89,9 +89,11 @@ export class Viewer extends EventTarget {
   }
 
   setBed(bed) {
-    this.bed = bed;
+    this.bed = { x0: 0, y0: 0, ...bed };
     this.bedGroup.clear();
-    const { width: W, depth: D, height: H } = bed;
+    // The bed group sits at the bed's front-left corner in printer coordinates.
+    this.bedGroup.position.set(this.bed.x0, this.bed.y0, 0);
+    const { width: W, depth: D, height: H } = this.bed;
     const c = this.bedColors || {};
     const plateMat = new THREE.MeshBasicMaterial({ color: c.plate || 0x2b3138 });
     let plate;
@@ -119,17 +121,22 @@ export class Viewer extends EventTarget {
     helper.material.opacity = 0.45;
     this.bedGroup.add(helper);
 
-    // A small marker at the origin corner, like the desktop app.
+    // A small marker at the printer's 0,0 point, like the desktop app.
     const axes = new THREE.AxesHelper(Math.min(W, D) * 0.08);
-    axes.position.set(0, 0, 0.05);
+    axes.position.set(-this.bed.x0, -this.bed.y0, 0.05);
     this.bedGroup.add(axes);
     this.refreshColors();
+  }
+
+  /** Centre of the bed in printer coordinates. */
+  bedCenter() {
+    return { x: this.bed.x0 + this.bed.width / 2, y: this.bed.y0 + this.bed.depth / 2 };
   }
 
   resetCamera() {
     const { width: W, depth: D, height: H } = this.bed;
     const h = Math.min(H, Math.max(W, D) * 0.6);
-    const center = new THREE.Vector3(W / 2, D / 2, h * 0.25);
+    const center = new THREE.Vector3(this.bed.x0 + W / 2, this.bed.y0 + D / 2, h * 0.25);
     const radius = 0.5 * Math.hypot(W, D, h);
     const vfov = THREE.MathUtils.degToRad(this.camera.fov);
     const hfov = 2 * Math.atan(Math.tan(vfov / 2) * this.camera.aspect);
@@ -254,14 +261,14 @@ export class Viewer extends EventTarget {
     const b = this.worldBox(id);
     if (!b) return true;
     const eps = 0.01;
-    const { width: W, depth: D, height: H, shape } = this.bed;
+    const { x0, y0, width: W, depth: D, height: H, shape } = this.bed;
     if (b.max.z > H + eps) return false;
     if (shape === 'circle') {
       const r = W / 2;
       const corners = [[b.min.x, b.min.y], [b.max.x, b.min.y], [b.min.x, b.max.y], [b.max.x, b.max.y]];
-      return corners.every(([x, y]) => Math.hypot(x - W / 2, y - D / 2) <= r + eps);
+      return corners.every(([x, y]) => Math.hypot(x - (x0 + W / 2), y - (y0 + D / 2)) <= r + eps);
     }
-    return b.min.x >= -eps && b.min.y >= -eps && b.max.x <= W + eps && b.max.y <= D + eps;
+    return b.min.x >= x0 - eps && b.min.y >= y0 - eps && b.max.x <= x0 + W + eps && b.max.y <= y0 + D + eps;
   }
 
   refreshColors() {

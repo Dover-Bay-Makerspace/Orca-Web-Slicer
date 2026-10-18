@@ -203,7 +203,7 @@ function effectiveMachine() {
 }
 
 /** The ordered setting layers the engine applies for a slice of the given plates. */
-function settingLayers(plateIds = state.plates.map((p) => p.id)) {
+function settingLayers(plateIds = state.plates.map((p) => p.id), shift = null) {
   const m = effectiveMachine();
   const nozzles = extruderCount(m);
   const fil = state.filamentCombined;
@@ -236,21 +236,124 @@ function settingLayers(plateIds = state.plates.map((p) => p.id)) {
     final.flush_multiplier = Array(nozzles).fill(String(mult));
   }
   const used = new Set(state.objects.filter((o) => plateIds.includes(o.plateId)).map((o) => o.filament));
+  let tower = false;
   if (used.size > 1) {
     // A plate with more than one filament needs the prime tower to purge into.
     if (!('enable_prime_tower' in state.overrides)) final.enable_prime_tower = '1';
-    const tower = 'enable_prime_tower' in state.overrides ? first(state.overrides.enable_prime_tower) === '1' : true;
-    if (tower && String(first(effective('use_relative_e_distances'))) !== '1') final.use_relative_e_distances = '1';
-    const bambu = /^Bambu Lab/.test(String(first(m.printer_model) || ''));
-    const blc = String(first(effective('before_layer_change_gcode')) ?? '');
-    if (tower && !bambu && !/G92\s+E0/.test(blc)) final.before_layer_change_gcode = blc + (blc && !blc.endsWith('\n') ? '\n' : '') + 'G92 E0';
+    tower = 'enable_prime_tower' in state.overrides ? first(state.overrides.enable_prime_tower) === '1' : true;
   }
+  Object.assign(final, extruderAddressing(m, tower));
+  // Values worked out here (from the presets and the user's changes) win over the raw changes.
+  const shifted = shift ? shiftedBedSettings(shift, { ...changes, ...final }) : {};
   return [
     { settings: state.machine },
     { settings: state.process },
     { settings: fil },
-    { format: 'orca.native-json', settings: { ...final, ...changes } },
+    { format: 'orca.native-json', settings: { ...changes, ...final, ...shifted } },
   ];
+}
+
+/**
+ * The web engine only accepts models between 0 and the bed size, but many
+ * printers' beds don't start at 0,0 (e.g. -110…110 on a Flashforge
+ * Adventurer 5M, or a delta's round bed). For those, the engine slices in a
+ * frame shifted to start at 0, and the worker shifts every slicer-made move
+ * back afterwards. The printer's own G-code is wrapped in markers so it is
+ * left alone, and its position placeholders get the offset added back.
+ */
+function bedShift() {
+  const b = bedFromMachine(effectiveMachine());
+  return Math.abs(b.x0) > 1e-6 || Math.abs(b.y0) > 1e-6 ? [b.x0, b.y0] : null;
+}
+
+/** The real (unshifted) bed values, for the settings copy at the end of the G-code. */
+function realBedSettings() {
+  const out = {};
+  for (const k of ['printable_area', 'bed_exclude_area', 'extruder_printable_area', 'wipe_tower_x', 'wipe_tower_y']) {
+    const v = effective(k);
+    if (v === undefined || v === null || v === '') continue;
+    out[k] = Array.isArray(v) ? v.join(k === 'extruder_printable_area' ? ';' : ',') : String(v);
+  }
+  return out;
+}
+
+function shiftPoints(value, dx, dy) {
+  const one = (text) => String(text).split(',').map((p) => {
+    const m = /^\s*(-?[\d.]+)\s*[xX]\s*(-?[\d.]+)\s*$/.exec(p);
+    return m ? `${+(+m[1] - dx).toFixed(4)}x${+(+m[2] - dy).toFixed(4)}` : p;
+  }).join(',');
+  return Array.isArray(value) ? value.map(one) : one(value);
+}
+
+const POSITION_PLACEHOLDER = /\b(first_layer_print_min|first_layer_print_max|adaptive_bed_mesh_min|adaptive_bed_mesh_max|print_bed_min|print_bed_max)\[(0|1)\]/g;
+const RAW_BEGIN = ';OWS_RAW_BEGIN';
+const RAW_END = ';OWS_RAW_END';
+
+function isTemplateKey(key) {
+  return /_gcode$/.test(key) && !/^(emit_|enable_|use_|disable_)/.test(key) && !/_to_gcode$/.test(key);
+}
+
+function shiftedBedSettings([dx, dy], final) {
+  const out = {};
+  const get = (k) => (k in final ? final[k] : effective(k));
+  for (const k of ['printable_area', 'bed_exclude_area', 'extruder_printable_area']) {
+    const v = get(k);
+    if (v !== undefined && v !== null && v !== '') out[k] = shiftPoints(v, dx, dy);
+  }
+  for (const [k, d] of [['wipe_tower_x', dx], ['wipe_tower_y', dy]]) {
+    const v = get(k);
+    if (v === undefined || v === null || v === '') continue;
+    const f = (x) => String(+(parseFloat(x) - d).toFixed(4));
+    out[k] = Array.isArray(v) ? v.map(f) : f(v);
+  }
+  const off = [dx, dy];
+  const fix = (text) => {
+    if (typeof text !== 'string' || !text.trim()) return text;
+    const t = text.replace(POSITION_PLACEHOLDER, (_, name, i) => {
+      const d = off[+i];
+      return `(${name}[${i}] ${d < 0 ? '-' : '+'} ${Math.abs(+d.toFixed(4))})`;
+    });
+    return `${RAW_BEGIN}\n${t}\n${RAW_END}`;
+  };
+  const keys = new Set([...Object.keys(state.machine || {}), ...Object.keys(state.process || {}),
+    ...Object.keys(state.filamentCombined), ...Object.keys(final)]);
+  for (const k of keys) {
+    if (!isTemplateKey(k)) continue;
+    const v = get(k);
+    if (typeof v === 'string') out[k] = fix(v);
+    else if (Array.isArray(v) && v.every((x) => typeof x === 'string')) out[k] = v.map(fix);
+  }
+  return out;
+}
+
+const G92_ANY = /^[ \t]*[gG]92[ \t]*[eE](0(\.0*)?|\.0+)[ \t]*(;.*)?$/m;
+const G92_EXACT = /^[ \t]*G92[ \t]*E(0(\.0*)?|\.0+)[ \t]*(;.*)?$/m;
+
+/**
+ * Relative/absolute extrusion, settled the way desktop OrcaSlicer does it.
+ * Desktop OrcaSlicer defaults to relative E (most profiles rely on that and
+ * reset the extruder with "G92 E0" each layer); the web engine starts from
+ * absolute, so the default has to be passed explicitly. The result always
+ * passes OrcaSlicer's check in Print::validate().
+ */
+function extruderAddressing(machine, needsRelative) {
+  const out = {};
+  const userSet = 'use_relative_e_distances' in state.overrides;
+  const preset = state.process?.use_relative_e_distances ?? machine.use_relative_e_distances;
+  let relative = String(first(userSet ? state.overrides.use_relative_e_distances : preset ?? '1')) === '1';
+  const before = String(first(effective('before_layer_change_gcode')) ?? '');
+  const layer = String(first(effective('layer_change_gcode')) ?? '');
+  // "G92 E0" in the layer G-code only works with relative E.
+  if (!relative && !userSet && (G92_ANY.test(before) || G92_ANY.test(layer))) relative = true;
+  if (needsRelative) relative = true; // the prime tower requires relative E
+  out.use_relative_e_distances = relative ? '1' : '0';
+  const flavor = String(first(effective('gcode_flavor')) || 'marlin');
+  const bambu = /Bambu Lab/.test(String(first(machine.printer_model) || ''));
+  if (relative && /^marlin2?$/.test(flavor) && !bambu && !G92_EXACT.test(before) && !G92_EXACT.test(layer)) {
+    // Marlin needs the extruder reset every layer in relative mode.
+    out.before_layer_change_gcode = before + (before && !before.endsWith('\n') ? '\n' : '') + 'G92 E0';
+  }
+  return out;
 }
 
 function settingsChanged() {
@@ -338,8 +441,27 @@ function updateBed(resetCamera = false) {
   if (!state.machine) return;
   const bed = bedFromMachine(effectiveMachine());
   const b = viewer.bed;
-  const changed = !b || b.width !== bed.width || b.depth !== bed.depth || b.height !== bed.height || b.shape !== bed.shape;
-  if (changed) viewer.setBed(bed);
+  const changed = !b || b.width !== bed.width || b.depth !== bed.depth || b.height !== bed.height || b.shape !== bed.shape
+    || (b.x0 || 0) !== bed.x0 || (b.y0 || 0) !== bed.y0;
+  if (changed) {
+    const before = b ? viewer.bedCenter() : null;
+    viewer.setBed(bed);
+    if (before) {
+      // Keep models in the same place relative to the bed's centre, then
+      // re-place any that no longer fit.
+      const after = viewer.bedCenter();
+      for (const item of state.objects) {
+        item.x += after.x - before.x;
+        item.y += after.y - before.y;
+        viewer.updateObject(item);
+      }
+      for (const item of state.objects) {
+        if (viewer.isInside(item.id)) continue;
+        const spot = findFreeSpot(item);
+        if (spot) { item.x = spot.x; item.y = spot.y; viewer.updateObject(item); }
+      }
+    }
+  }
   if ((changed || resetCamera) && !state.objects.length) viewer.resetCamera();
   ui.bedInfo.textContent = `Build volume ${Math.round(bed.width)} × ${Math.round(bed.depth)} × ${Math.round(bed.height)} mm` +
     (state.printer?.nozzle ? ` · ${state.printer.nozzle} mm nozzle` : '');
@@ -816,8 +938,8 @@ function newItem({ name, positions, plateId, modifiers = [], x, y, quaternion, s
     positions,
     stl: null,
     plateId: plateId || state.activePlate,
-    x: x ?? viewer.bed.width / 2,
-    y: y ?? viewer.bed.depth / 2,
+    x: x ?? viewer.bedCenter().x,
+    y: y ?? viewer.bedCenter().y,
     quaternion: quaternion || new THREE.Quaternion(),
     scale: scale || [1, 1, 1],
     modifiers,
@@ -956,17 +1078,24 @@ function footprint(item) {
 }
 
 function findFreeSpot(item) {
-  const { width: W, depth: D } = viewer.bed;
+  const { x0, y0, width: W, depth: D } = viewer.bed;
   const f = footprint(item);
   if (!f) return null;
   const gap = 5;
   const others = objectsOn(item.plateId).filter((o) => o !== item).map((o) => viewer.worldBox(o.id)).filter(Boolean);
   const candidates = [];
   const step = 5;
-  for (let y = f.d / 2; y <= D - f.d / 2 + 0.01; y += step) {
-    for (let x = f.w / 2; x <= W - f.w / 2 + 0.01; x += step) candidates.push([x, y]);
+  const round = viewer.bed.shape === 'circle';
+  for (let y = y0 + f.d / 2; y <= y0 + D - f.d / 2 + 0.01; y += step) {
+    for (let x = x0 + f.w / 2; x <= x0 + W - f.w / 2 + 0.01; x += step) {
+      // On a round bed every corner of the footprint must be inside the circle.
+      if (round && [[-1, -1], [1, -1], [-1, 1], [1, 1]].some(([sx, sy]) =>
+        Math.hypot(x + (sx * f.w) / 2 - (x0 + W / 2), y + (sy * f.d) / 2 - (y0 + D / 2)) > W / 2)) continue;
+      candidates.push([x, y]);
+    }
   }
-  candidates.sort((a, b) => Math.hypot(a[0] - W / 2, a[1] - D / 2) - Math.hypot(b[0] - W / 2, b[1] - D / 2));
+  const cx = x0 + W / 2, cy = y0 + D / 2;
+  candidates.sort((a, b) => Math.hypot(a[0] - cx, a[1] - cy) - Math.hypot(b[0] - cx, b[1] - cy));
   for (const [x, y] of candidates) {
     const minX = x - f.w / 2 - gap, maxX = x + f.w / 2 + gap, minY = y - f.d / 2 - gap, maxY = y + f.d / 2 + gap;
     if (others.every((b) => maxX <= b.min.x || minX >= b.max.x || maxY <= b.min.y || minY >= b.max.y)) {
@@ -1191,7 +1320,8 @@ function renderObjectPanel() {
 // -------------------------------------------------------------- manifest --
 
 /** Project manifest + mesh blob in the engine's one-slicer-api format, for the given plates. */
-function buildProject(plateIds) {
+function buildProject(plateIds, shift = null) {
+  const toEngine = shift ? new THREE.Matrix4().makeTranslation(-shift[0], -shift[1], 0) : null;
   const plates = state.plates.filter((p) => plateIds.includes(p.id));
   const items = state.objects.filter((o) => plateIds.includes(o.plateId));
   const meshes = [];
@@ -1220,7 +1350,7 @@ function buildProject(plateIds) {
       id: 'inst-' + item.id,
       objectId: item.id,
       plateId: item.plateId,
-      transform: { matrix: toRowMajor(instanceMatrix(item, geometry)) },
+      transform: { matrix: toRowMajor(toEngine ? toEngine.clone().multiply(instanceMatrix(item, geometry)) : instanceMatrix(item, geometry)) },
     });
     for (const mod of item.modifiers) {
       if (!mod.stl) mod.stl = toBinaryStl(mod.positions);
@@ -1256,12 +1386,14 @@ const arrange = withBusy(async (operation = 'arrange') => {
   if (!onPlate.length) return;
   showMessage(operation === 'arrange' ? 'Arranging…' : 'Finding the best orientation…');
   try {
-    const { blob, manifest } = buildProject([state.activePlate]);
-    const { manifest: out } = await engine.arrange(settingLayers(), blob, manifest, operation);
+    const shift = bedShift();
+    const { blob, manifest } = buildProject([state.activePlate], shift);
+    const { manifest: out } = await engine.arrange(settingLayers([state.activePlate], shift), blob, manifest, operation);
     for (const inst of out.instances || []) {
       const item = state.objects.find((o) => 'inst-' + o.id === inst.id || o.id === inst.objectId);
       if (!item || !inst.transform?.matrix) continue;
       const m = fromRowMajor(inst.transform.matrix);
+      if (shift) m.premultiply(new THREE.Matrix4().makeTranslation(shift[0], shift[1], 0));
       const pos = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3();
       m.decompose(pos, q, s);
       item.quaternion.copy(q);
@@ -1325,11 +1457,12 @@ async function slice(all = false) {
   ui.progress.hidden = false;
   ui.progressFill.style.width = '0%';
   ui.progressText.textContent = 'Preparing…';
-  const { blob, manifest } = buildProject(plateIds);
-  const job = engine.slice(settingLayers(plateIds), blob, manifest, plateIds, (p) => {
+  const shift = bedShift();
+  const { blob, manifest } = buildProject(plateIds, shift);
+  const job = engine.slice(settingLayers(plateIds, shift), blob, manifest, plateIds, (p) => {
     if (Number.isFinite(p.percent)) ui.progressFill.style.width = p.percent + '%';
     if (p.stage) ui.progressText.textContent = p.stage;
-  }, isBambu());
+  }, isBambu() && !shift, shift && [shift[0], shift[1], realBedSettings()]);
   state.slicing = job;
   updateButtons();
   try {

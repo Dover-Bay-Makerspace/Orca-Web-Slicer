@@ -121,6 +121,53 @@ async function configuredSession(engine, layers) {
   return { session, skipped };
 }
 
+/**
+ * Move slicer-made coordinates back to the printer's own frame (see bedShift()
+ * in main.js). Lines between ;OWS_RAW_BEGIN and ;OWS_RAW_END come from the
+ * printer's G-code templates and are kept as they are; the markers are removed.
+ */
+function unshiftGcode(bytes, dx, dy, restore) {
+  const text = new TextDecoder().decode(bytes);
+  const lines = text.split('\n');
+  const out = [];
+  let raw = 0;
+  let absolute = true;
+  const fmt = (v) => {
+    const r = Math.round(v * 1000) / 1000;
+    return (Object.is(r, -0) ? 0 : r).toString();
+  };
+  for (let line of lines) {
+    if (line.startsWith(';OWS_RAW_BEGIN')) { raw++; continue; }
+    if (line.startsWith(';OWS_RAW_END')) { raw = Math.max(0, raw - 1); continue; }
+    if (line.charCodeAt(0) === 59 /* ; */ && line.includes('OWS_RAW_')) {
+      // The settings copy OrcaSlicer appends: drop the markers (written as \n escapes).
+      line = line.split(';OWS_RAW_BEGIN\\n').join('').split('\\n;OWS_RAW_END').join('').split(';OWS_RAW_BEGIN').join('').split(';OWS_RAW_END').join('');
+    }
+    const setting = /^; ([a-z0-9_]+) = /.exec(line);
+    if (setting && setting[1] in restore) { out.push(`; ${setting[1]} = ${restore[setting[1]]}`); continue; }
+    const code = line.split(';')[0].trim();
+    const head = code.split(/\s+/)[0].toUpperCase();
+    if (head === 'G90') absolute = true;
+    else if (head === 'G91') absolute = false;
+    if (raw || !absolute) { out.push(line); continue; }
+    if (/^G0*[0-3]$/.test(head)) {
+      const semi = line.indexOf(';');
+      const body = semi >= 0 ? line.slice(0, semi) : line;
+      const rest = semi >= 0 ? line.slice(semi) : '';
+      out.push(body.replace(/(^|\s)([XY])(-?\d*\.?\d+)/g, (_, sp, axis, num) => sp + axis + fmt(+num + (axis === 'X' ? dx : dy))) + rest);
+      continue;
+    }
+    if (/^EXCLUDE_OBJECT_DEFINE\b/i.test(code)) {
+      out.push(line
+        .replace(/CENTER=(-?[\d.]+),(-?[\d.]+)/, (_, x, y) => `CENTER=${fmt(+x + dx)},${fmt(+y + dy)}`)
+        .replace(/\[(-?[\d.]+),(-?[\d.]+)\]/g, (_, x, y) => `[${fmt(+x + dx)},${fmt(+y + dy)}]`));
+      continue;
+    }
+    out.push(line);
+  }
+  return new TextEncoder().encode(out.join('\n'));
+}
+
 /** The manifest reduced to one plate (and only what that plate uses). */
 function plateManifest(manifest, plateId) {
   const instances = manifest.instances.filter((i) => i.plateId === plateId);
@@ -164,7 +211,7 @@ const handlers = {
     }
   },
 
-  async slice({ id, layers, blob, manifest, plateIds, packaged }) {
+  async slice({ id, layers, blob, manifest, plateIds, packaged, shift }) {
     const engine = await loadEngine();
     const { session, skipped } = await configuredSession(engine, layers);
     const controller = new AbortController();
@@ -193,7 +240,8 @@ const handlers = {
       const collect = async (plate, pkg) => {
         const asset = (plate.assets || []).find((a) => a.kind === 'gcode');
         if (!asset) throw Object.assign(new Error('The engine finished but returned no G-code for ' + plate.plateId + '.'), { code: 'NO_DATA' });
-        const gcode = await session.getAsset(asset.id);
+        let gcode = await session.getAsset(asset.id);
+        if (shift) gcode = unshiftGcode(gcode, shift[0], shift[1], shift[2] || {});
         const entry = { plateId: plate.plateId, gcode: gcode.buffer, statistics: plate.statistics || null };
         transfer.push(gcode.buffer);
         if (pkg) { entry.package = pkg.buffer; transfer.push(pkg.buffer); }

@@ -63,22 +63,30 @@ export function first(value) {
   return Array.isArray(value) ? value[0] : value;
 }
 
-/** Printable area of a machine preset as { width, depth, height, shape }. */
+/**
+ * Printable area of a machine preset: { x0, y0, width, depth, height, shape }.
+ * x0/y0 is the bed's front-left corner in printer coordinates; on many
+ * printers it isn't 0,0 (e.g. -110,-110 on a Flashforge Adventurer 5M, or a
+ * delta's round bed centred on 0,0).
+ */
 export function bedFromMachine(machine) {
   let area = machine.printable_area;
   if (typeof area === 'string') area = area.split(',');
-  let maxX = 0, maxY = 0, points = 0;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, points = 0;
   for (const p of area || []) {
     const m = /^\s*(-?[\d.]+)\s*[xX]\s*(-?[\d.]+)\s*$/.exec(p);
     if (!m) continue;
-    maxX = Math.max(maxX, +m[1]);
-    maxY = Math.max(maxY, +m[2]);
+    minX = Math.min(minX, +m[1]); maxX = Math.max(maxX, +m[1]);
+    minY = Math.min(minY, +m[2]); maxY = Math.max(maxY, +m[2]);
     points++;
   }
   const height = parseFloat(first(machine.printable_height)) || 250;
+  if (!points || maxX <= minX || maxY <= minY) return { x0: 0, y0: 0, width: 256, depth: 256, height, shape: 'rectangle' };
   return {
-    width: maxX || 256,
-    depth: maxY || 256,
+    x0: minX,
+    y0: minY,
+    width: maxX - minX,
+    depth: maxY - minY,
     height,
     shape: points > 8 ? 'circle' : 'rectangle',
   };
