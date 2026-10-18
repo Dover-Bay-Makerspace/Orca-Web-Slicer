@@ -369,8 +369,13 @@ export function combineParts(parts, onProgress = () => {}) {
 
 if (typeof self !== 'undefined' && typeof window === 'undefined' && typeof self.postMessage === 'function') {
   self.onmessage = (event) => {
-    const { id, parts } = event.data;
+    const { id, parts, op } = event.data;
     try {
+      if (op === 'subtract') {
+        const positions = subtract(event.data.a, event.data.b);
+        self.postMessage({ id, ok: true, result: { positions } }, [positions.buffer]);
+        return;
+      }
       const result = combineParts(parts, (percent) => self.postMessage({ id, progress: percent }));
       self.postMessage({ id, ok: true, result }, [result.positions.buffer]);
     } catch (error) {

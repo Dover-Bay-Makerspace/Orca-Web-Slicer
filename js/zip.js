@@ -55,3 +55,59 @@ export function makeZip(files) {
   dv.setUint32(p + 12, p - cdStart, true); dv.setUint32(p + 16, cdStart, true);
   return out;
 }
+
+async function inflateRaw(bytes) {
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/** Every file in a ZIP (stored or deflated, ZIP64 aware): [{ name, data }] in order. */
+export async function readZip(bytes) {
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  let eocd = -1;
+  for (let i = u8.length - 22; i >= Math.max(0, u8.length - 65557); i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('Not a zip file.');
+  let count = dv.getUint16(eocd + 10, true);
+  let cdOffset = dv.getUint32(eocd + 16, true);
+  if (cdOffset === 0xffffffff || count === 0xffff) {
+    const loc = eocd - 20;
+    if (loc >= 0 && dv.getUint32(loc, true) === 0x07064b50) {
+      const z64 = Number(dv.getBigUint64(loc + 8, true));
+      count = Number(dv.getBigUint64(z64 + 32, true));
+      cdOffset = Number(dv.getBigUint64(z64 + 48, true));
+    }
+  }
+  const dec = new TextDecoder();
+  const out = [];
+  let p = cdOffset;
+  for (let n = 0; n < count; n++) {
+    if (dv.getUint32(p, true) !== 0x02014b50) break;
+    const method = dv.getUint16(p + 10, true);
+    let csize = dv.getUint32(p + 20, true);
+    let usize = dv.getUint32(p + 24, true);
+    const nameLen = dv.getUint16(p + 28, true), extraLen = dv.getUint16(p + 30, true), commentLen = dv.getUint16(p + 32, true);
+    let local = dv.getUint32(p + 42, true);
+    const name = dec.decode(u8.subarray(p + 46, p + 46 + nameLen));
+    let e = p + 46 + nameLen;
+    const eEnd = e + extraLen;
+    while (e + 4 <= eEnd) {
+      const tag = dv.getUint16(e, true), size = dv.getUint16(e + 2, true);
+      if (tag === 0x0001) {
+        let q = e + 4;
+        if (usize === 0xffffffff) { usize = Number(dv.getBigUint64(q, true)); q += 8; }
+        if (csize === 0xffffffff) { csize = Number(dv.getBigUint64(q, true)); q += 8; }
+        if (local === 0xffffffff) local = Number(dv.getBigUint64(q, true));
+      }
+      e += 4 + size;
+    }
+    const start = local + 30 + dv.getUint16(local + 26, true) + dv.getUint16(local + 28, true);
+    const raw = u8.subarray(start, start + csize);
+    const data = method === 0 ? raw.slice() : method === 8 ? await inflateRaw(raw) : null;
+    if (data) out.push({ name, data });
+    p = eEnd + commentLen;
+  }
+  return out;
+}

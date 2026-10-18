@@ -8,7 +8,11 @@ import {
 import { SettingsEditor, keyTabs } from './settings-editor.js';
 import { readProjectFile } from './project-io.js';
 import { MeshPaint, mapStates, paintStates, paintVolumes, overhangTriangles } from './paint.js';
-import { makeZip } from './zip.js';
+import { shellGroups, transformed, pick, cutAtHeight, concatMeshes, boxMesh, cylinderMesh, sphereMesh } from './mesh-tools.js';
+import { makeZip, readZip } from './zip.js';
+import { fontList, loadFont, textSolid } from './text3d.js';
+import { md5 } from './md5.js';
+import { thumbnailSizes, thumbnailBlock, pngBytes } from './thumbnails.js';
 import { flushVolume } from './flush.js';
 
 const API_VERSION = '0.7.0';
@@ -28,13 +32,17 @@ const ui = Object.fromEntries([
   'engineStatus', 'aboutBtn', 'aboutDialog', 'aboutVersions', 'sourceLink', 'newBtn', 'openBtn', 'saveBtn', 'projectFile',
   'vendorSelect', 'printerSelect', 'bedTypeSelect', 'bedInfo', 'slotList', 'addSlotBtn', 'slotHint', 'processSelect',
   'objFilament', 'objSwatch', 'rBreakdown', 'download3mfBtn',
-  'qLayer', 'qInfill', 'qWalls', 'qSupport', 'qBrim', 'resetQuick', 'importPreset', 'presetFile', 'advBtn', 'advCount',
+  'qLayer', 'qInfill', 'qWalls', 'qSupport', 'qBrim', 'qAdaptive', 'resetQuick', 'importPreset', 'presetFile', 'advBtn', 'advCount',
   'advPanel', 'sliceBtn', 'sliceAllBtn', 'progress', 'progressFill', 'progressText', 'cancelBtn', 'result', 'rPlate',
   'rTime', 'rFilament', 'downloadBtn', 'downloadAllBtn', 'rNote', 'message', 'tabPrepare', 'tabPreview', 'prepareTools',
-  'addBtn', 'modelFile', 'arrangeBtn', 'orientBtn', 'rotX', 'rotY', 'rotZ', 'rotateTool', 'layFlatTool', 'paintTool', 'paintBar', 'paintColours', 'paintErase',
+  'addBtn', 'modelFile', 'arrangeBtn', 'orientBtn', 'rotX', 'rotY', 'rotZ', 'sizeX', 'sizeY', 'sizeZ', 'sizeLock', 'mirX', 'mirY', 'mirZ', 'splitBtn', 'rotateTool', 'layFlatTool', 'paintTool', 'paintBar', 'paintColours', 'paintErase',
   'paintBrushMode', 'paintFillMode', 'paintSize', 'paintSizeText', 'paintAngle', 'paintAngleText', 'paintSizeRow',
   'paintAngleRow', 'paintUndo', 'paintRedo', 'paintClear', 'paintHint', 'undoBtn', 'redoBtn', 'supportTool', 'supportAutoRow',
-  'supportAuto', 'supportAutoAngle', 'supportBoxSection', 'rotXDeg', 'rotYDeg', 'rotZDeg', 'rotReset', 'scaleInput', 'dupBtn', 'delBtn', 'viewport',
+  'supportAuto', 'supportAutoAngle', 'supportBoxSection', 'measureTool', 'measureBar', 'measureText', 'measureClear', 'cutTool', 'cutBar', 'cutHeight', 'cutHeightNum',
+  'cutKeepTop', 'cutKeepBottom', 'cutFlip', 'cutGo', 'cutHint',
+  'layerActions', 'layerActionLabel', 'addPauseBtn', 'addColourBtn', 'markerList', 'shapesBtn', 'shapesMenu',
+  'textDialog', 'textValue', 'textFont', 'textHeight', 'textDepth', 'textFilament', 'textFilamentRow',
+  'towerDialog', 'towerStart', 'towerEnd', 'towerStep', 'rotXDeg', 'rotYDeg', 'rotZDeg', 'rotReset', 'scaleInput', 'dupBtn', 'delBtn', 'viewport',
   'dropHint', 'layerControls', 'layerSlider', 'layerLabel', 'legend', 'objectBar', 'objectList', 'selectionInfo',
   'fitBtn', 'plateBar', 'plateList', 'addPlateBtn', 'delPlateBtn', 'objPanel', 'objName', 'objPlate', 'addEnforcer', 'addBlocker',
   'partSection', 'partList', 'modList', 'modEdit', 'modTitle', 'modX', 'modY', 'modZ', 'modW', 'modD', 'modH', 'modDelete',
@@ -43,6 +51,8 @@ const ui = Object.fromEntries([
 // ------------------------------------------------------------------ state --
 
 const state = {
+  adaptive: '',
+  markers: new Map(), // plate id -> [{ layer, z, type: 'pause' | 'colour' }]
   engineReady: false,
   engineError: null,
   index: null,
@@ -83,6 +93,7 @@ function save() {
     process: ui.processSelect.value,
     slots: state.slots.map((x) => ({ value: x.value, colour: x.colour, nozzle: x.nozzle })),
     overrides: state.overrides,
+    adaptive: state.adaptive,
     userPresets: state.userPresets,
   };
   try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch { /* storage unavailable: settings just aren't remembered */ }
@@ -282,6 +293,17 @@ function settingLayers(plateIds = state.plates.map((p) => p.id), shift = null) {
     tower = 'enable_prime_tower' in state.overrides ? first(state.overrides.enable_prime_tower) === '1' : true;
   }
   Object.assign(final, extruderAddressing(m, tower));
+  // Temperature tower: the first band's temperature is the print temperature.
+  const bands = plateIds.length === 1 ? calibrationOn(plateIds[0]) : null;
+  if (bands) {
+    final.nozzle_temperature = Array(total).fill(String(bands[0].temp));
+    final.nozzle_temperature_initial_layer = Array(total).fill(String(bands[0].temp));
+  }
+  // Adaptive layer height: the engine's own pseudo-settings (desktop's Adaptive tool).
+  if (state.adaptive) {
+    final.adaptive_layer_height = true;
+    final.adaptive_layer_height_quality = +state.adaptive;
+  }
   // Green support paint or an enforcer box means "supports here": with Supports
   // off, switch them on for those places only (OrcaSlicer's "manual" support).
   const onPlates = state.objects.filter((o) => plateIds.includes(o.plateId));
@@ -430,6 +452,7 @@ async function initProfiles() {
   BED_TYPES.forEach((b) => ui.bedTypeSelect.append(option(b.value, b.label)));
   const savedSlots = Array.isArray(state.saved.slots) ? state.saved.slots : null;
   await selectVendor(wanted, { printer: state.saved.printer, process: state.saved.process, slots: savedSlots, restoring: true });
+  state.adaptive = ['0.2', '0.5', '0.8'].includes(state.saved.adaptive) ? state.saved.adaptive : '';
   if (state.saved.overrides && typeof state.saved.overrides === 'object') {
     state.overrides = { ...state.saved.overrides };
     for (const k of Object.keys(state.overrides)) setOverride(k, state.overrides[k]);
@@ -851,6 +874,7 @@ function fillQuick() {
   ui.qWalls.value = v.walls;
   ui.qSupport.value = v.support;
   ui.qBrim.value = v.brim;
+  ui.qAdaptive.value = state.adaptive || '';
   // A brim setting the quick list can't show (e.g. mouse ears) is shown as "On".
   const b = first(effective('brim_type'));
   ui.qBrim.title = b && !['auto_brim', 'no_brim', 'outer_only'].includes(b) ? `Profile/Advanced value: ${b}` : '';
@@ -1394,6 +1418,7 @@ function selectedModifier() {
 function objectsChanged() {
   recordHistory();
   renderPaintBar();
+  renderCutBar();
   const onPlate = objectsOn(state.activePlate);
   ui.dropHint.hidden = viewer.mode !== 'prepare' || state.objects.length > 0;
   ui.objectBar.hidden = viewer.mode !== 'prepare' || onPlate.length === 0;
@@ -1475,6 +1500,362 @@ function renderRotation(item) {
 
 function setTool(tool) {
   viewer.setTool(viewer.tool === tool ? 'move' : tool);
+}
+
+// ------------------------------------------------------------ size tools --
+
+/** For each printer axis, the model's own axis it lines up with (or null when turned at an odd angle). */
+function axisMap(item) {
+  const m = new THREE.Matrix4().makeRotationFromQuaternion(item.quaternion).elements; // column-major
+  const map = [];
+  for (let i = 0; i < 3; i++) {
+    let best = 0, bj = 0;
+    for (let j = 0; j < 3; j++) { const v = Math.abs(m[j * 4 + i]); if (v > best) { best = v; bj = j; } }
+    if (best < 0.9999) return null;
+    map.push(bj);
+  }
+  return new Set(map).size === 3 ? map : null;
+}
+
+function renderSize(item) {
+  const b = viewer.bedBox(item.id);
+  if (!b) return;
+  const size = [b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z];
+  [ui.sizeX, ui.sizeY, ui.sizeZ].forEach((inp, i) => { if (document.activeElement !== inp) inp.value = String(Math.round(size[i] * 100) / 100); });
+}
+
+function setSize(axis, value) {
+  const item = selected();
+  if (!item || !Number.isFinite(value) || value <= 0) return;
+  const b = viewer.bedBox(item.id);
+  const now = [b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z][axis];
+  if (!(now > 0)) return;
+  const k = value / now;
+  if (ui.sizeLock.checked) item.scale = item.scale.map((v) => v * k);
+  else {
+    // Stretch along the model's own axis that lines up with this printer axis.
+    const map = axisMap(item);
+    const j = map ? map[axis] : axis;
+    item.scale[j] *= k;
+    if (!map) showMessage('This model is turned at an angle, so the size changes along its own axis.');
+  }
+  viewer.updateObject(item);
+  invalidatePlate(item.plateId);
+  objectsChanged();
+}
+
+function mirror(axis) {
+  const item = selected();
+  if (!item) return;
+  const map = axisMap(item);
+  item.scale[map ? map[axis] : axis] *= -1;
+  viewer.updateObject(item);
+  invalidatePlate(item.plateId);
+  objectsChanged();
+}
+
+// ------------------------------------------------- shapes, text, towers --
+
+function subtractInWorker(a, b) {
+  const id = ++partsJob;
+  return new Promise((resolve, reject) => {
+    const onMessage = (event) => {
+      if (event.data.id !== id || 'progress' in event.data) return;
+      partsWorker.removeEventListener('message', onMessage);
+      if (event.data.ok) resolve(event.data.result.positions); else reject(new Error(event.data.error));
+    };
+    partsWorker.addEventListener('message', onMessage);
+    partsWorker.postMessage({ id, op: 'subtract', a, b });
+  });
+}
+
+/** Put a new model on the active plate at a free spot. */
+function addShapeItem(name, positions, extra = {}) {
+  normalise(positions);
+  const item = addItem(newItem({ name, positions, ...extra }));
+  const spot = findFreeSpot(item);
+  if (spot) { item.x = spot.x; item.y = spot.y; viewer.updateObject(item); }
+  item.placed = true;
+  viewer.select(item.id);
+  objectsChanged();
+  return item;
+}
+
+const towerFont = () => loadFont('dejavu-sans-bold');
+
+async function addShape(kind) {
+  ui.shapesMenu.hidden = true;
+  ui.shapesBtn.setAttribute('aria-expanded', 'false');
+  if (kind === 'cube') addShapeItem('Cube', boxMesh(20, 20, 20));
+  else if (kind === 'cylinder') addShapeItem('Cylinder', cylinderMesh(20, 20));
+  else if (kind === 'cone') addShapeItem('Cone', cylinderMesh(20, 20, 64, 0.01));
+  else if (kind === 'sphere') addShapeItem('Sphere', sphereMesh(20));
+  else if (kind === 'text') openTextDialog();
+  else if (kind === 'temptower') openTowerDialog();
+  else if (kind === 'firstlayer') addFirstLayerTest();
+  else if (kind === 'stringing') {
+    const base = boxMesh(50, 12, 1);
+    const left = cylinderMesh(7, 30, 48, 4).map((v, i) => (i % 3 === 0 ? v - 18 : v));
+    const right = cylinderMesh(7, 30, 48, 4).map((v, i) => (i % 3 === 0 ? v + 18 : v));
+    addShapeItem('Stringing test', concatMeshes([base, left, right]));
+    showMessage('Stringing test: two towers far apart. Fine hairs between them mean the retraction or temperature needs tuning.');
+  }
+}
+
+/** Five thin squares (corners and centre) to check the bed level and first layer. */
+function addFirstLayerTest() {
+  const { width: W, depth: D } = viewer.bed;
+  const size = Math.max(15, Math.min(30, Math.min(W, D) * 0.12));
+  const t = Math.round(2 * (+first(effective('initial_layer_print_height')) || 0.2) * 100) / 100;
+  const inset = size / 2 + Math.min(W, D) * 0.06;
+  const spots = [[-1, -1], [1, -1], [-1, 1], [1, 1], [0, 0]];
+  const squares = spots.map(([sx, sy]) => boxMesh(size, size, t).map((v, i) => (i % 3 === 0 ? v + sx * (W / 2 - inset) : i % 3 === 1 ? v + sy * (D / 2 - inset) : v)));
+  const item = addShapeItem('First layer test', concatMeshes(squares));
+  const c = viewer.bedCenter();
+  item.x = c.x; item.y = c.y;
+  viewer.updateObject(item);
+  objectsChanged();
+  showMessage(`First layer test: five ${size.toFixed(0)} mm squares, ${t} mm thick. Each should be smooth and flat; adjust the bed level or Z offset where they aren't.`);
+}
+
+function openTowerDialog() {
+  const t = +first(effective('nozzle_temperature')) || 210;
+  const round5 = (v) => Math.round(v / 5) * 5;
+  ui.towerStart.value = String(round5(t + 15));
+  ui.towerEnd.value = String(round5(t - 15));
+  ui.towerStep.value = '5';
+  ui.towerDialog.returnValue = '';
+  ui.towerDialog.showModal();
+}
+
+async function addTemperatureTower(start, end, step) {
+  if (!Number.isFinite(start) || !Number.isFinite(end) || !(step > 0)) return;
+  const dir = end >= start ? 1 : -1;
+  const temps = [];
+  for (let tmp = start; dir > 0 ? tmp <= end : tmp >= end; tmp += dir * step) temps.push(tmp);
+  if (temps.length < 2 || temps.length > 20) { showMessage('Use 2 to 20 temperatures for the tower.', 'error'); return; }
+  const font = await towerFont();
+  const blocks = [];
+  const band = 10;
+  temps.forEach((temp, i) => {
+    const z0 = i * band;
+    // A block with an overhang on the right and the temperature on the front.
+    const body = boxMesh(24, 10, band).map((v, k) => (k % 3 === 2 ? v + z0 : v));
+    // A 45° wedge sticking out of the right side.
+    const overhang = flipWindingIfNeeded(new Float32Array(wedge(12, -5, z0 + 1, 8, 10, band - 1)));
+    const label = textSolid(font, String(temp), 5, 0.6);
+    // Stand the label up on the front face (y = -5).
+    for (let k = 0; k < label.length; k += 3) {
+      const x = label[k], y = label[k + 1], z = label[k + 2];
+      label[k] = x - 1;
+      label[k + 1] = -5 - z;
+      label[k + 2] = y + z0 + band / 2;
+    }
+    flipWindingIfNeeded(label);
+    blocks.push(body, overhang, label);
+  });
+  const base = boxMesh(34, 16, 1).map((v, k) => (k % 3 === 0 ? v + 3 : k % 3 === 2 ? v - 1 : v));
+  const positions = concatMeshes([base, ...blocks]);
+  const item = addShapeItem(`Temperature tower ${temps[0]}-${temps[temps.length - 1]}`, positions);
+  // Band z values count from the bed (the base plate is 1 mm).
+  item.calib = { type: 'temperature', bands: temps.map((temp, i) => ({ z: i === 0 ? 0 : 1 + i * band, temp })) };
+  showMessage(`Temperature tower: ${temps.join(', ')} °C from the bottom up. Slice and print it as it is (the page sets each block's temperature).`);
+}
+
+/** A wedge: width w along X from x0, depth d along Y from y0, from z0 to z0 + h, sloping 45° under. */
+function wedge(x0, y0, z0, w, d, h) {
+  const s = Math.min(w, h);
+  const p = [[x0, y0, z0 + h - s], [x0 + s, y0, z0 + h], [x0, y0, z0 + h], [x0, y0 + d, z0 + h - s], [x0 + s, y0 + d, z0 + h], [x0, y0 + d, z0 + h]];
+  const f = [[0, 2, 1], [3, 4, 5], [0, 1, 4], [0, 4, 3], [1, 2, 5], [1, 5, 4], [2, 0, 3], [2, 3, 5]];
+  return f.flatMap((t) => t.flatMap((i) => p[i]));
+}
+
+/** Make sure a closed mesh's triangles face outwards (positive volume). */
+function flipWindingIfNeeded(p) {
+  let v = 0;
+  for (let i = 0; i < p.length; i += 9) {
+    v += p[i] * (p[i + 4] * p[i + 8] - p[i + 5] * p[i + 7]) - p[i + 1] * (p[i + 3] * p[i + 8] - p[i + 5] * p[i + 6])
+      + p[i + 2] * (p[i + 3] * p[i + 7] - p[i + 4] * p[i + 6]);
+  }
+  if (v < 0) {
+    for (let i = 0; i < p.length; i += 9) for (let k = 0; k < 3; k++) { const t = p[i + 3 + k]; p[i + 3 + k] = p[i + 6 + k]; p[i + 6 + k] = t; }
+  }
+  return p;
+}
+
+let fontsLoaded = false;
+async function openTextDialog() {
+  if (!fontsLoaded) {
+    const list = await fontList();
+    ui.textFont.replaceChildren(...list.map((f) => option(f.id, f.label)));
+    fontsLoaded = true;
+  }
+  const sel = selected();
+  for (const r of document.querySelectorAll('input[name="textWhere"]')) {
+    r.disabled = r.value !== 'new' && !sel;
+    if (r.disabled && r.checked) document.querySelector('input[name="textWhere"][value="new"]').checked = true;
+  }
+  ui.textFilament.replaceChildren(...state.slots.map((_, i) => option(String(i + 1), slotLabel(i))));
+  ui.textFilament.value = String(Math.min(2, state.slots.length));
+  ui.textFilamentRow.hidden = state.slots.length < 2;
+  ui.textDialog.returnValue = '';
+  ui.textDialog.showModal();
+  ui.textValue.select();
+}
+
+async function addText() {
+  const text = ui.textValue.value.trim();
+  if (!text) return;
+  const where = document.querySelector('input[name="textWhere"]:checked')?.value || 'new';
+  const font = await loadFont(ui.textFont.value || 'poppins-bold');
+  const height = Math.max(1, +ui.textHeight.value || 8);
+  const depth = Math.max(0.2, +ui.textDepth.value || 1.5);
+  const solid = textSolid(font, text, height, depth);
+  if (!solid) { showMessage('None of those characters are in this font.', 'error'); return; }
+  const item = selected();
+  if (where === 'new' || !item) {
+    addShapeItem(`Text "${text.slice(0, 20)}"`, solid);
+    return;
+  }
+  // Place the text in the middle of the model's top, in the model's own frame.
+  const local = instanceMatrix(item, viewer.objects.get(item.id).mesh.geometry);
+  const b = viewer.bedBox(item.id);
+  const cx = (b.min.x + b.max.x) / 2, cy = (b.min.y + b.max.y) / 2;
+  const toModel = local.clone().invert();
+  const embed = Math.min(0.2, depth / 4);
+  if (where === 'raise') {
+    const world = new THREE.Matrix4().makeTranslation(cx, cy, b.max.z - embed);
+    const textPos = transformed(solid, toModel.clone().multiply(world));
+    const filament = state.slots.length > 1 ? +ui.textFilament.value : item.filament;
+    const parts = item.parts
+      ? item.parts.map((p) => ({ name: p.name, filament: p.filament, positions: item.positions.slice(p.start, p.end) }))
+      : [{ name: item.name, filament: item.filament, positions: item.positions }];
+    parts.push({ name: 'Text', filament, positions: textPos });
+    const result = partsEngineReady() || parts.every((p) => p.filament === parts[0].filament)
+      ? { ...rawParts(parts), notes: [] } : await combineColourParts(parts);
+    const oneColour = result.parts.every((p) => p.filament === result.parts[0].filament);
+    applyNewGeometry(item, result.positions, oneColour ? null : result.parts);
+    showMessage(['Text added on top.', ...result.notes].join(' '));
+  } else {
+    if (item.parts) { showMessage('Cutting text into a multi-colour model isn\'t supported; add it to one part first.', 'error'); return; }
+    // A cutter from slightly above the top down to the text depth.
+    const cutter = textSolid(font, text, height, depth + 1);
+    const world = new THREE.Matrix4().makeTranslation(cx, cy, b.max.z - depth);
+    showMessage('Cutting the text in…');
+    const out = await subtractInWorker(item.positions, transformed(cutter, toModel.clone().multiply(world)));
+    applyNewGeometry(item, out, null);
+    showMessage('Text cut into the top.');
+  }
+}
+
+/** Swap a model's mesh (same place on the plate). Paint is dropped: its triangles changed. */
+function applyNewGeometry(item, positions, parts) {
+  item.positions = positions;
+  item.parts = parts ? parts.map((p) => ({ ...p, stl: null })) : null;
+  item.filament = parts ? parts[0].filament : item.filament;
+  item.stl = null;
+  item.paint = null;
+  item.supportPaint = null;
+  item.painter = item.supportPainter = null;
+  item.paintRev = (item.paintRev || 0) + 1;
+  item.supportRev = (item.supportRev || 0) + 1;
+  item.geomRev = (item.geomRev || 0) + 1;
+  viewer.removeObject(item.id);
+  viewer.addObject(item);
+  viewer.select(item.id);
+  invalidatePlate(item.plateId);
+  objectsChanged();
+}
+
+// ------------------------------------------------------------------- cut --
+
+const cutState = { id: null, h: 0 };
+
+function renderCutBar() {
+  const on = viewer.tool === 'cut' && viewer.mode === 'prepare';
+  ui.cutBar.hidden = !on;
+  const item = on ? selected() : null;
+  if (!item) { viewer.showCutPlane(null); ui.cutGo.disabled = true; return; }
+  const b = viewer.bedBox(item.id);
+  const top = Math.round((b.max.z - b.min.z) * 100) / 100;
+  if (cutState.id !== item.id) { cutState.id = item.id; cutState.h = Math.round(top * 50) / 100; }
+  cutState.h = Math.min(Math.max(cutState.h, 0.1), Math.max(0.1, top - 0.1));
+  ui.cutHeight.max = String(top);
+  ui.cutHeight.value = String(cutState.h);
+  if (document.activeElement !== ui.cutHeightNum) ui.cutHeightNum.value = String(cutState.h);
+  ui.cutGo.disabled = state.busy > 0;
+  viewer.showCutPlane(item.id, cutState.h);
+}
+
+function cutSelected() {
+  const item = selected();
+  if (!item) return;
+  const keepTop = ui.cutKeepTop.checked, keepBottom = ui.cutKeepBottom.checked;
+  if (!keepTop && !keepBottom) { showMessage('Keep at least one of the two parts.'); return; }
+  const local = instanceMatrix(item, viewer.objects.get(item.id).mesh.geometry);
+  const world = transformed(item.positions, local); // printer coordinates, resting on the bed
+  const { below, above, open } = cutAtHeight(world, cutState.h);
+  if (!below.length || !above.length) { showMessage('The cut height is outside the model.'); return; }
+  const pieces = [];
+  const make = (positions, name, flip) => {
+    if (flip) {
+      // Upside down, so the flat cut face sits on the bed.
+      for (let i = 0; i < positions.length; i += 3) { positions[i + 1] = -positions[i + 1]; positions[i + 2] = -positions[i + 2]; }
+    }
+    const b = bounds(positions);
+    const cx = (b.min[0] + b.max[0]) / 2, cy = (b.min[1] + b.max[1]) / 2;
+    normalise(positions);
+    return newItem({ name, positions, plateId: item.plateId, x: cx, y: flip ? -cy : cy, filament: item.filament, placed: true });
+  };
+  if (keepBottom) pieces.push(make(below, `${item.name} (bottom)`, false));
+  if (keepTop) pieces.push(make(above, `${item.name} (top)`, ui.cutFlip.checked));
+  removeItem(item);
+  for (const p of pieces) addItem(p);
+  // The top part goes next to the bottom one.
+  if (pieces.length === 2) {
+    const spot = findFreeSpot(pieces[1]);
+    if (spot) { pieces[1].x = spot.x; pieces[1].y = spot.y; viewer.updateObject(pieces[1]); }
+  }
+  viewer.select(pieces[0].id);
+  objectsChanged();
+  const notes = [`Cut at ${cutState.h.toFixed(2)} mm.`];
+  if (open) notes.push('This model has holes in its surface, so the cut face could not be closed; check it in the preview.');
+  if (item.parts || item.paint?.size || item.supportPaint?.size || item.modifiers.length) notes.push('Colour parts, paint and support boxes were removed from the cut parts.');
+  showMessage(notes.join(' '));
+}
+
+/** Each separate piece of the selected model becomes its own model, where it is. */
+function splitSelected() {
+  const item = selected();
+  if (!item) return;
+  const groups = shellGroups(item.positions);
+  if (groups.length < 2) { showMessage('This model is one piece, so there is nothing to split.'); return; }
+  if (groups.length > 200) { showMessage(`This model has ${groups.length} pieces; splitting more than 200 isn't supported.`, 'error'); return; }
+  const local = instanceMatrix(item, viewer.objects.get(item.id).mesh.geometry);
+  const mirrored = local.determinant() < 0;
+  const partOf = (t) => item.parts?.find((p) => t * 9 >= p.start && t * 9 < p.end);
+  const pieces = groups.map((tris, n) => {
+    const positions = transformed(pick(item.positions, tris), local);
+    const b = bounds(positions);
+    const cx = (b.min[0] + b.max[0]) / 2, cy = (b.min[1] + b.max[1]) / 2;
+    normalise(positions);
+    // Paint follows its triangles (not when mirrored: the triangles' corner order changes).
+    const remap = (map) => {
+      if (!map?.size || mirrored) return null;
+      const out = new Map();
+      tris.forEach((t, i) => { const v = map.get(t); if (v) out.set(i, v); });
+      return out.size ? out : null;
+    };
+    return newItem({
+      name: `${item.name} (${n + 1})`, positions, plateId: item.plateId, x: cx, y: cy, placed: true,
+      filament: partOf(tris[0])?.filament || item.filament, paint: remap(item.paint), supportPaint: remap(item.supportPaint),
+    });
+  });
+  removeItem(item);
+  for (const p of pieces) addItem(p);
+  viewer.select(pieces[0].id);
+  objectsChanged();
+  showMessage(`Split into ${pieces.length} models.` + (item.modifiers.length ? ' Support boxes were removed.' : ''));
 }
 
 // ------------------------------------------------------------- painting --
@@ -1766,6 +2147,7 @@ function renderObjectPanel() {
   ui.objSwatch.style.background = state.slots[item.filament - 1]?.colour || '#999';
   ui.supportBoxSection.hidden = viewer.tool !== 'supports' && !item.modifiers.length;
   renderRotation(item);
+  renderSize(item);
   const mod = selectedModifier();
   ui.modList.replaceChildren(...item.modifiers.map((m, i) => {
     const b = document.createElement('button');
@@ -1998,6 +2380,8 @@ async function slice(all = false) {
   ui.progressFill.style.width = '0%';
   ui.progressText.textContent = 'Preparing…';
   const shift = bedShift();
+  // Pictures for printer screens, drawn now while the models are on screen.
+  const thumbs = new Map(plateIds.map((id) => [id, makeThumbnails(id)]));
   const { blob, manifest } = buildProject(plateIds, shift);
   const job = engine.slice(settingLayers(plateIds, shift), blob, manifest, plateIds, (p) => {
     if (Number.isFinite(p.percent)) ui.progressFill.style.width = p.percent + '%';
@@ -2009,6 +2393,10 @@ async function slice(all = false) {
     const res = await job.promise;
     for (const plate of res.plates) {
       state.results.set(plate.plateId, {
+        raw: new Uint8Array(plate.gcode),
+        rawPackage: plate.package ? new Uint8Array(plate.package) : null,
+        thumbs: thumbs.get(plate.plateId),
+        calib: calibrationOn(plate.plateId),
         gcode: new Uint8Array(plate.gcode),
         package: plate.package ? new Uint8Array(plate.package) : null,
         packageError: !!plate.packageError,
@@ -2020,6 +2408,8 @@ async function slice(all = false) {
         skipped: res.skipped || [],
       });
     }
+    ui.progressText.textContent = 'Finishing G-code…';
+    for (const plate of res.plates) await finishGcode(plate.plateId);
     const show = plateIds.includes(state.activePlate) ? state.activePlate : plateIds[0];
     if (show !== state.activePlate) setActivePlate(show);
     ui.progressText.textContent = 'Building preview…';
@@ -2035,6 +2425,147 @@ async function slice(all = false) {
     renderPlates();
     updateButtons();
   }
+}
+
+// ------------------------------------------------------ G-code finishing --
+//
+// After slicing, the page adds what the engine leaves out: pauses / colour
+// changes the user placed on layers, temperature steps for a temperature
+// tower, and thumbnails. The engine's own G-code is kept, so these can change
+// without slicing again.
+
+function makeThumbnails(plateId) {
+  const m = effectiveMachine();
+  let sizes = thumbnailSizes(m.thumbnails, first(m.thumbnails_format) || 'PNG');
+  if (!sizes.length && isBambu()) sizes = [{ w: 300, h: 300, fmt: 'PNG' }];
+  try {
+    const images = sizes.map(({ w, h, fmt }) => ({ img: viewer.renderThumbnail(plateId, w, h), fmt })).filter((x) => x.img);
+    const plate = isBambu() ? viewer.renderThumbnail(plateId, 512, 512) : null;
+    return { block: images.length ? thumbnailBlock(images) : '', plate: plate ? pngBytes(plate) : null };
+  } catch (error) {
+    console.warn('thumbnail', error);
+    return { block: '', plate: null };
+  }
+}
+
+/** Temperature tower on a plate: [{ z, temp }] from bottom to top, or null. */
+function calibrationOn(plateId) {
+  const tower = objectsOn(plateId).find((o) => o.calib?.type === 'temperature');
+  return tower ? tower.calib.bands : null;
+}
+
+function pauseCode(kind, layer, z) {
+  const m = effectiveMachine();
+  const flavor = String(first(m.gcode_flavor) || '');
+  const pause = String(first(m.machine_pause_gcode) || '') || (flavor === 'klipper' ? 'PAUSE' : 'M601');
+  // Bambu and Klipper printers swap filament through their own pause screen.
+  const code = kind === 'pause' || isBambu() || flavor === 'klipper' ? pause : (String(first(m.color_change_gcode) || '') || 'M600');
+  const filled = code.replace(/\[layer_num\]|\{layer_num\}/g, String(layer)).replace(/\[layer_z\]|\{layer_z\}/g, z.toFixed(2));
+  return `; ${kind === 'pause' ? 'PAUSE_PRINT' : 'COLOR_CHANGE'} (Orca Web Slicer, layer ${layer + 1})\n${filled}`;
+}
+
+/** Insert lines at the start of layers: inserts = [{ z, code }] (z of the layer's top). */
+function insertAtLayers(text, inserts) {
+  if (!inserts.length) return text;
+  const list = [...inserts].sort((a, b) => a.z - b.z);
+  const lines = text.split('\n');
+  const out = [];
+  let k = 0;
+  for (const line of lines) {
+    out.push(line);
+    if (k >= list.length) continue;
+    let z = NaN;
+    if (line.startsWith(';Z:')) z = parseFloat(line.slice(3));
+    else if (line.startsWith('; Z_HEIGHT:')) z = parseFloat(line.slice(11));
+    if (!Number.isFinite(z)) continue;
+    while (k < list.length && list[k].z <= z + 1e-4) out.push(list[k++].code);
+  }
+  return out.join('\n');
+}
+
+function addThumbnails(text, block) {
+  if (!block || /; thumbnail(_\w+)? begin/.test(text.slice(0, 200000))) return text;
+  const end = text.indexOf('; HEADER_BLOCK_END');
+  if (end >= 0) {
+    const nl = text.indexOf('\n', end) + 1;
+    return text.slice(0, nl) + '\n' + block + text.slice(nl);
+  }
+  return block + text;
+}
+
+/** Build a plate's final G-code (and Bambu package) from the engine's output. */
+async function finishGcode(plateId) {
+  const r = state.results.get(plateId);
+  if (!r) return;
+  const inserts = (state.markers.get(plateId) || []).map((mk) => ({ z: mk.z, code: pauseCode(mk.type, mk.layer, mk.z) }));
+  if (r.calib) {
+    r.calib.slice(1).forEach((band) => inserts.push({ z: band.z + 1e-3, code: `; temperature tower: ${band.temp} °C\nM104 S${band.temp}` }));
+  }
+  let text = new TextDecoder().decode(r.raw);
+  text = addThumbnails(insertAtLayers(text, inserts), r.thumbs?.block);
+  r.gcode = new TextEncoder().encode(text);
+  r.package = r.rawPackage;
+  if (r.rawPackage && (inserts.length || r.thumbs?.plate)) {
+    try {
+      const files = await readZip(r.rawPackage);
+      const g = files.find((f) => /^Metadata\/plate_\d+\.gcode$/.test(f.name));
+      if (g) {
+        g.data = r.gcode;
+        const sum = files.find((f) => f.name === g.name + '.md5');
+        if (sum) sum.data = new TextEncoder().encode(md5(r.gcode));
+        const png = g.name.replace(/\.gcode$/, '.png');
+        if (r.thumbs?.plate && !files.some((f) => f.name === png)) files.push({ name: png, data: r.thumbs.plate });
+        r.package = makeZip(files);
+      }
+    } catch (error) {
+      console.warn('package', error);
+    }
+  }
+}
+
+function renderMarkers() {
+  const d = viewer.previewData;
+  const preview = viewer.mode === 'preview' && d && d.layerEnds.length;
+  ui.layerActions.hidden = !preview;
+  if (!preview) return;
+  const i = Number(ui.layerSlider.value) - 1;
+  const z = d.layerZ[i];
+  ui.layerActionLabel.textContent = `Before layer ${i + 1}` + (Number.isFinite(z) ? ` (${z.toFixed(2)} mm):` : ':');
+  const list = state.markers.get(state.previewPlate) || [];
+  ui.markerList.replaceChildren(...list.map((mk) => {
+    const li = document.createElement('li');
+    li.textContent = `${mk.type === 'pause' ? 'Pause' : 'Colour change'} before layer ${mk.layer + 1} (${mk.z.toFixed(2)} mm)`;
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.textContent = '×';
+    x.title = 'Remove';
+    x.onclick = () => setMarkers(list.filter((m) => m !== mk));
+    li.append(x);
+    return li;
+  }));
+}
+
+async function setMarkers(list) {
+  const id = state.previewPlate;
+  if (!id) return;
+  state.markers.set(id, list.sort((a, b) => a.z - b.z));
+  await finishGcode(id);
+  renderMarkers();
+  renderResult();
+}
+
+function addMarker(type) {
+  const d = viewer.previewData;
+  if (!d) return;
+  const i = Number(ui.layerSlider.value) - 1;
+  const z = d.layerZ[i];
+  if (!Number.isFinite(z) || i < 1) { showMessage('Pick a layer above the first one with the layer slider.'); return; }
+  const list = (state.markers.get(state.previewPlate) || []).filter((m) => Math.abs(m.z - z) > 1e-4);
+  list.push({ layer: i, z, type });
+  setMarkers(list);
+  showMessage(type === 'pause'
+    ? `The printer will pause before layer ${i + 1}. Resume it from the printer when you're ready.`
+    : `The printer will stop before layer ${i + 1} so you can change the filament${isBambu() ? ' (from the printer screen, then resume)' : ''}.`);
 }
 
 function isBambu() {
@@ -2194,6 +2725,7 @@ function updateLayerLabel() {
   viewer.showLayers(0, i);
   const z = d.layerZ[i];
   ui.layerLabel.textContent = `${i + 1} / ${d.layerEnds.length}` + (Number.isFinite(z) ? ` · ${z.toFixed(2)} mm` : '');
+  renderMarkers();
 }
 
 function setTab(tab) {
@@ -2205,6 +2737,7 @@ function setTab(tab) {
   ui.tabPreview.setAttribute('aria-selected', String(preview));
   ui.prepareTools.hidden = preview;
   ui.layerControls.hidden = !preview;
+  renderMarkers();
   ui.legend.hidden = !preview;
   objectsChanged();
 }
@@ -2231,9 +2764,11 @@ function updateButtons() {
   ui.openBtn.disabled = busy;
   const r = state.results.get(state.activePlate);
   ui.tabPreview.disabled = !r || r.stale;
-  for (const b of [ui.rotX, ui.rotY, ui.rotZ, ui.rotXDeg, ui.rotYDeg, ui.rotZDeg, ui.rotReset, ui.dupBtn, ui.delBtn, ui.scaleInput]) b.disabled = !sel || busy;
+  for (const b of [ui.rotX, ui.rotY, ui.rotZ, ui.rotXDeg, ui.rotYDeg, ui.rotZDeg, ui.rotReset, ui.dupBtn, ui.delBtn, ui.scaleInput,
+    ui.sizeX, ui.sizeY, ui.sizeZ, ui.mirX, ui.mirY, ui.mirZ, ui.splitBtn]) b.disabled = !sel || busy;
   const hasModels = state.objects.some((o) => o.plateId === state.activePlate);
-  for (const b of [ui.rotateTool, ui.layFlatTool, ui.paintTool, ui.supportTool]) b.disabled = !hasModels || busy;
+  for (const b of [ui.rotateTool, ui.layFlatTool, ui.paintTool, ui.supportTool, ui.cutTool]) b.disabled = !hasModels || busy;
+  ui.measureTool.disabled = busy;
 }
 
 // --------------------------------------------------------------- projects --
@@ -2291,7 +2826,7 @@ function signature() {
   const f = (v) => (Math.round(v * 1e4) / 1e4).toString();
   return state.plates.map((p) => p.id + ':' + p.name).join(',') + '#' + state.objects.map((o) => [
     o.id, o.plateId, f(o.x), f(o.y), o.quaternion.toArray().map(f).join(' '), o.scale.map(f).join(' '), o.filament,
-    o.parts ? o.parts.map((p) => p.filament).join('+') : '', o.paintRev || 0, o.supportRev || 0,
+    o.parts ? o.parts.map((p) => p.filament).join('+') : '', o.paintRev || 0, o.supportRev || 0, o.geomRev || 0,
     o.modifiers.map((m) => m.id + m.role + m.matrix.elements.map(f).join(' ')).join(';'),
   ].join('|')).join('/');
 }
@@ -2513,8 +3048,10 @@ ui.processSelect.onchange = withBusy(async () => { await selectProcess(ui.proces
 ui.addSlotBtn.onclick = withBusy(addSlot);
 ui.bedTypeSelect.onchange = () => { invalidateAll(); save(); };
 for (const el of [ui.qLayer, ui.qInfill, ui.qWalls, ui.qSupport, ui.qBrim]) el.addEventListener('change', quickChanged);
+ui.qAdaptive.onchange = () => { state.adaptive = ui.qAdaptive.value || ''; invalidateAll(); save(); };
 ui.resetQuick.onclick = () => {
   for (const k of ['layer_height', 'sparse_infill_density', 'wall_loops', 'enable_support', 'support_type', 'brim_type']) delete state.overrides[k];
+  state.adaptive = '';
   settingsChanged();
   editor?.render();
 };
@@ -2529,6 +3066,27 @@ ui.arrangeBtn.onclick = () => arrange('arrange');
 ui.orientBtn.onclick = () => arrange('auto-orient');
 ui.paintTool.onclick = () => setTool('paint');
 ui.supportTool.onclick = () => setTool('supports');
+ui.measureTool.onclick = () => setTool('measure');
+ui.cutTool.onclick = () => setTool('cut');
+ui.shapesBtn.onclick = (e) => {
+  e.stopPropagation();
+  ui.shapesMenu.hidden = !ui.shapesMenu.hidden;
+  ui.shapesBtn.setAttribute('aria-expanded', String(!ui.shapesMenu.hidden));
+};
+document.addEventListener('click', (e) => { if (!ui.shapesMenu.hidden && !e.target.closest('.menu-wrap')) ui.shapesMenu.hidden = true; });
+for (const b of ui.shapesMenu.querySelectorAll('[data-shape]')) b.onclick = withBusy(() => addShape(b.dataset.shape).catch((e) => showMessage(errorText(e), 'error')));
+ui.textDialog.addEventListener('close', () => {
+  if (ui.textDialog.returnValue === 'add') withBusy(() => addText().catch((e) => showMessage(errorText(e), 'error')))();
+});
+ui.towerDialog.addEventListener('close', () => {
+  if (ui.towerDialog.returnValue === 'add') {
+    withBusy(() => addTemperatureTower(+ui.towerStart.value, +ui.towerEnd.value, +ui.towerStep.value).catch((e) => showMessage(errorText(e), 'error')))();
+  }
+});
+ui.cutHeight.oninput = () => { cutState.h = +ui.cutHeight.value; renderCutBar(); };
+ui.cutHeightNum.onchange = () => { cutState.h = +ui.cutHeightNum.value; renderCutBar(); };
+ui.cutGo.onclick = () => cutSelected();
+ui.measureClear.onclick = () => viewer.clearMeasure();
 ui.supportAuto.onclick = () => {
   const item = selected() || objectsOn(state.activePlate)[0];
   if (!item) return;
@@ -2556,6 +3114,9 @@ ui.rotateTool.onclick = () => setTool('rotate');
 ui.layFlatTool.onclick = () => setTool('layflat');
 for (const inp of [ui.rotXDeg, ui.rotYDeg, ui.rotZDeg]) inp.addEventListener('change', setRotationFromInputs);
 ui.rotReset.onclick = resetRotation;
+[ui.sizeX, ui.sizeY, ui.sizeZ].forEach((inp, i) => inp.addEventListener('change', () => setSize(i, parseFloat(inp.value))));
+[ui.mirX, ui.mirY, ui.mirZ].forEach((b, i) => { b.onclick = () => mirror(i); });
+ui.splitBtn.onclick = splitSelected;
 ui.rotX.onclick = () => rotateSelected(new THREE.Vector3(1, 0, 0));
 ui.rotY.onclick = () => rotateSelected(new THREE.Vector3(0, 1, 0));
 ui.rotZ.onclick = () => rotateSelected(new THREE.Vector3(0, 0, 1));
@@ -2575,6 +3136,8 @@ ui.tabPreview.onclick = async () => {
   setTab('preview');
 };
 ui.layerSlider.oninput = updateLayerLabel;
+ui.addPauseBtn.onclick = () => addMarker('pause');
+ui.addColourBtn.onclick = () => addMarker('colour');
 ui.fitBtn.onclick = () => {
   if (viewer.mode === 'preview' && viewer.previewData?.bounds) viewer.frame(viewer.previewData.bounds);
   else viewer.frameModels();
@@ -2633,10 +3196,21 @@ viewer.addEventListener('tool', (e) => {
   ui.layFlatTool.setAttribute('aria-pressed', String(e.detail.tool === 'layflat'));
   ui.paintTool.setAttribute('aria-pressed', String(e.detail.tool === 'paint'));
   ui.supportTool.setAttribute('aria-pressed', String(e.detail.tool === 'supports'));
+  ui.measureTool.setAttribute('aria-pressed', String(e.detail.tool === 'measure'));
+  ui.measureBar.hidden = e.detail.tool !== 'measure';
+  ui.cutTool.setAttribute('aria-pressed', String(e.detail.tool === 'cut'));
+  renderCutBar();
   renderObjectPanel();
   renderPaintBar();
 });
 viewer.addEventListener('paint', (e) => applyPaint(e.detail));
+viewer.addEventListener('measure', (e) => {
+  const { count, d, length } = e.detail;
+  const f = (v) => (Math.round(v * 100) / 100).toFixed(2);
+  ui.measureText.innerHTML = count === 2
+    ? `<b>${f(length)} mm</b> &nbsp; X ${f(d[0])} · Y ${f(d[1])} · Z ${f(d[2])}`
+    : count === 1 ? 'Now click the second point.' : 'Click a point on a model or the bed, then a second point.';
+});
 viewer.addEventListener('move', (e) => {
   if (e.detail.live) {
     if (e.detail.rotated) { const item = selected(); if (item) renderRotation(item); }
@@ -2675,6 +3249,9 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'r' || e.key === 'R') setTool('rotate');
   if (e.key === 'f' || e.key === 'F') setTool('layflat');
   if (e.key === 'n' || e.key === 'N') setTool('paint');
+  if (e.key === 'm' || e.key === 'M') setTool('measure');
+  if (e.key === 'c' || e.key === 'C') setTool('cut');
+  if (e.key === 't' || e.key === 'T') openTextDialog();
   if (e.key === 'Escape' && viewer.tool !== 'move') viewer.setTool('move');
 });
 

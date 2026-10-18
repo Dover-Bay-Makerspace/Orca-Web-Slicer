@@ -160,6 +160,24 @@ Hover over the pill to see the full error message.
 - **Limits:** painted seams and per-model setting modifiers aren't available. Adding a .3mf
   with **Add model** brings in just its models. Use **Open project…** to also
   load its plates and settings.
+- **Model tools** (toolbar; hover a button for its name and key):
+  **Cut** (C) splits a model at a height, optionally turning the top part
+  over; **Measure** (M) shows the distance between two clicked points; the
+  model panel sets the **size in mm** (with or without keeping proportions),
+  **mirrors**, and **splits** a model into its separate pieces.
+- **Shapes ▾:** cube, cylinder, cone, sphere, **Text** (T: as a new model,
+  raised on top of the selected model in any filament, or cut into it), and
+  calibration prints: a **temperature tower** (the page sets each block's
+  temperature), a **first layer test** and a **stringing test**.
+- **Pause / colour change:** in Preview, move the layer slider and click
+  **Pause here** or **Colour change here**. The printer stops before that
+  layer (Bambu and Klipper printers through their pause; others with M600).
+  No re-slicing needed; the pauses stay until you remove them.
+- **Thumbnails:** printers with a screen show a picture of the print, in the
+  sizes and formats their profile asks for (PNG, JPG or QOI). Bambu packages
+  also get the plate picture.
+- **Layers: Adaptive** (quick setting) uses thinner layers where a model
+  curves, like OrcaSlicer's Adaptive layer height.
 - **Plates:** every plate is shown side by side in Prepare, numbered, with
   the active plate outlined in orange. Click a plate (or a model on it) to
   work on it, or drag a model from one plate onto another. **Fit** with no
@@ -214,7 +232,8 @@ The **Run workflow** form also has two optional boxes:
 index.html, css/, js/       the web app (plain files, no build step)
 workers/                    engine worker + G-code preview parser
 engine/                     slicer-mt.js + slicer-mt.wasm (downloaded at deploy time)
-vendor/                     three.js (3D view)
+vendor/                     three.js (3D view), fonts for the Text tool
+tools/build-fonts.py        turn TrueType fonts into vendor/fonts/*.json
 coi-serviceworker.min.js    supplies the required headers on GitHub Pages
 tools/fetch-engine.sh/.ps1  download the engine
 tools/build-profiles.py     build profiles/ from an OrcaSlicer checkout

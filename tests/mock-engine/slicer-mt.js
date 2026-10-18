@@ -182,6 +182,7 @@ var OneSlicerEngine = (function () {
       '; filament_colour = ' + JSON.stringify(cfg.filament_colour), '; filament_map = ' + JSON.stringify(cfg.filament_map),
       '; filament_type = ' + JSON.stringify(cfg.filament_type),
       '; flush_volumes_matrix_len = ' + (cfg.flush_volumes_matrix ? cfg.flush_volumes_matrix.length : 0),
+      '; adaptive_layer_height = ' + cfg.adaptive_layer_height + ' ' + cfg.adaptive_layer_height_quality,
       '; enable_prime_tower = ' + cfg.enable_prime_tower, '; use_relative_e_distances = ' + cfg.use_relative_e_distances,
       '; before_layer_change_gcode = ' + JSON.stringify(cfg.before_layer_change_gcode),
       '; object_tools = ' + boxes.map(function (b) { return b.tool; }).join(','),

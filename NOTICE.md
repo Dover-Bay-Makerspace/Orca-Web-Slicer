@@ -32,6 +32,16 @@
   The BSP-tree solid boolean used to cut overlapping colour parts follows its
   algorithm (rewritten here without recursion).
 
+## Fonts for the Text tool (`vendor/fonts/`)
+
+Outline files made with `tools/build-fonts.py` (characters subset, outlines unchanged):
+
+- Poppins Bold: Copyright 2020 The Poppins Project Authors, SIL Open Font
+  License 1.1 (`vendor/fonts/LICENSE-OFL.txt`).
+- DejaVu Sans Bold, DejaVu Sans Condensed Bold, DejaVu Serif Bold: Bitstream
+  Vera licence with DejaVu changes in the public domain
+  (`vendor/fonts/LICENSE-DejaVu.txt`).
+
 ## This site
 
 The web interface (HTML/CSS/JS, tools and workflow) is released under the

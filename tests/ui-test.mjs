@@ -579,6 +579,177 @@ try {
     await rctx.close();
   }
 
+  // OrcaSlicer tools: sizing, split, measure, cut, text, shapes, calibration, pauses, thumbnails, adaptive layers.
+  {
+    const octx = await browser.newContext({ viewport: { width: 1400, height: 860 }, acceptDownloads: true });
+    const op = await octx.newPage();
+    op.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
+    op.on('dialog', (d) => d.accept());
+    await op.goto(`http://localhost:${port}/`);
+    await op.waitForFunction(() => document.getElementById('engineStatus').textContent.includes('ready'), null, { timeout: 20000 });
+    await op.waitForFunction(() => document.getElementById('printerSelect').options.length > 0);
+    await op.waitForTimeout(300);
+    const dims = () => op.$eval('#selectionInfo', (e) => (/([\d.]+ × [\d.]+ × [\d.]+)/.exec(e.textContent) || [])[1] || '');
+    const count = () => op.$$eval('#objectList li', (l) => l.length);
+    const sliceText = async () => {
+      await op.click('#sliceBtn');
+      await op.waitForSelector('#downloadBtn:not([disabled])', { state: 'visible', timeout: 30000 });
+      const [dl] = await Promise.all([op.waitForEvent('download'), op.click('#downloadBtn')]);
+      return fs.readFileSync(await dl.path(), 'utf8');
+    };
+    const shape = async (kind) => { await op.click('#shapesBtn'); await op.click(`[data-shape="${kind}"]`); await op.waitForTimeout(200); };
+
+    // Size in mm, keep proportions, stretch one axis, mirror.
+    await op.setInputFiles('#modelFile', [path.join(models, 'tall-box.stl')]);
+    await op.waitForFunction(() => document.querySelectorAll('#objectList li').length === 1);
+    await op.click('#objectList li button');
+    await op.fill('#sizeZ', '80');
+    await op.dispatchEvent('#sizeZ', 'change');
+    check('size in mm keeps proportions', (await dims()) === '40.0 × 60.0 × 80.0', await dims());
+    await op.uncheck('#sizeLock');
+    await op.fill('#sizeX', '10');
+    await op.dispatchEvent('#sizeX', 'change');
+    check('size of one axis without proportions', (await dims()) === '10.0 × 60.0 × 80.0', await dims());
+    await op.click('#mirX');
+    check('mirror flips the model', await op.evaluate(() => window.orcaWeb.state.objects[0].scale[0] < 0) && (await dims()) === '10.0 × 60.0 × 80.0');
+
+    // Cut it at 30 mm: two parts, the top one turned over.
+    await op.keyboard.press('c');
+    await op.fill('#cutHeightNum', '30');
+    await op.dispatchEvent('#cutHeightNum', 'change');
+    await op.screenshot({ path: path.join(OUT, '19-cut-plane.png') });
+    await op.click('#cutGo');
+    await op.waitForTimeout(200);
+    const cutDims = await op.evaluate(() => window.orcaWeb.state.objects.map((o) => {
+      const b = window.orcaWeb.viewer.bedBox(o.id); return [b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z].map((v) => v.toFixed(1)).join('x');
+    }));
+    check('cut makes a bottom and a top part', cutDims.join(',') === '10.0x60.0x30.0,10.0x60.0x50.0', cutDims.join(','));
+    const watertight = await op.evaluate(() => window.orcaWeb.state.objects.every((o) => {
+      const p = o.positions; let v = 0;
+      for (let i = 0; i < p.length; i += 9) v += p[i] * (p[i + 4] * p[i + 8] - p[i + 5] * p[i + 7]) - p[i + 1] * (p[i + 3] * p[i + 8] - p[i + 5] * p[i + 6]) + p[i + 2] * (p[i + 3] * p[i + 7] - p[i + 4] * p[i + 6]);
+      return v > 0;
+    }));
+    check('cut parts are closed solids', watertight);
+    await op.keyboard.press('Escape');
+
+    // Split a two-piece file.
+    await op.click('#newBtn');
+    await op.setInputFiles('#modelFile', [path.join(models, 'fob-letters.stl')]);
+    await op.waitForFunction(() => document.querySelectorAll('#objectList li').length === 1);
+    await op.click('#objectList li button');
+    await op.click('#splitBtn');
+    check('split makes one model per piece', (await count()) === 2);
+
+    // Measure between two bed points 100 mm apart.
+    await op.keyboard.press('m');
+    const pts = await op.evaluate(() => {
+      const v = window.orcaWeb.viewer;
+      const rect = v.renderer.domElement.getBoundingClientRect();
+      const scr = (x, y) => { const q = new v.cutPlane.position.constructor(x, y, 0).project(v.camera); return [rect.left + (q.x + 1) / 2 * rect.width, rect.top + (1 - q.y) / 2 * rect.height]; };
+      const c = v.bedCenter();
+      return [scr(c.x - 50, c.y - 60), scr(c.x + 50, c.y - 60)];
+    });
+    await op.mouse.click(...pts[0]);
+    await op.mouse.click(...pts[1]);
+    const mt = await op.textContent('#measureText');
+    check('measure shows the distance between two points', /^100\.0\d mm/.test(mt.trim()) || /^99\.9\d mm/.test(mt.trim()), mt);
+    await op.keyboard.press('Escape');
+
+    // Shapes and text.
+    await op.click('#newBtn');
+    await shape('cube');
+    check('Shapes adds a 20 mm cube', (await dims()) === '20.0 × 20.0 × 20.0', await dims());
+    const trisBefore = await op.evaluate(() => window.orcaWeb.state.objects[0].positions.length / 9);
+    await shape('text');
+    await op.fill('#textValue', 'AB');
+    await op.check('input[name="textWhere"][value="raise"]');
+    await op.click('#textAdd');
+    await op.waitForFunction((n) => window.orcaWeb.state.objects[0].positions.length / 9 > n, trisBefore, { timeout: 15000 });
+    await op.click('#objectList li button');
+    check('text raised on top of the selected model', (await count()) === 1 && /20\.0 × 20\.0 × 21\.[0-9]/.test(await dims()), await dims());
+    await op.screenshot({ path: path.join(OUT, '20-raised-text.png') });
+    await shape('text');
+    await op.fill('#textValue', 'Hi');
+    await op.check('input[name="textWhere"][value="new"]');
+    await op.click('#textAdd');
+    await op.waitForFunction(() => document.querySelectorAll('#objectList li').length === 2, null, { timeout: 15000 });
+    check('text as a new model', (await count()) === 2);
+    await op.click('#objectList li:nth-child(1) button');
+    const before = await op.evaluate(() => window.orcaWeb.state.objects[0].positions.length);
+    await shape('text');
+    await op.fill('#textValue', 'C');
+    await op.check('input[name="textWhere"][value="engrave"]');
+    await op.click('#textAdd');
+    await op.waitForFunction((n) => window.orcaWeb.state.objects[0].positions.length !== n, before, { timeout: 30000 });
+    check('text cut into the top of a model', /20\.0 × 20\.0 × 21\.[0-9]/.test(await dims()), await dims());
+
+    // Calibration prints.
+    await op.click('#newBtn');
+    await shape('firstlayer');
+    check('first layer test spans the bed', await op.evaluate(() => { const o = window.orcaWeb.state.objects[0]; const b = window.orcaWeb.viewer.bedBox(o.id); return b.max.x - b.min.x > 150 && b.max.z - b.min.z < 1; }));
+    await shape('stringing');
+    check('stringing test added', (await count()) === 2);
+    await op.click('#newBtn');
+    await shape('temptower');
+    await op.fill('#towerStart', '220');
+    await op.fill('#towerEnd', '200');
+    await op.fill('#towerStep', '10');
+    await op.click('#towerDialog button[value="add"]');
+    await op.waitForFunction(() => window.orcaWeb.state.objects.length === 1, null, { timeout: 15000 });
+    await op.screenshot({ path: path.join(OUT, '21-temperature-tower.png') });
+    await op.selectOption('#qAdaptive', '0.5');
+    const tt = await sliceText();
+    check('temperature tower: one temperature per block', tt.includes('; nozzle_temperature = ["220"]') && /M104 S210/.test(tt) && /M104 S200/.test(tt),
+      tt.split('\n').filter((l) => /nozzle_temperature =|M104 S2/.test(l)).join(' | '));
+    check('adaptive layer height reaches the engine', tt.includes('; adaptive_layer_height = true 0.5'));
+    check('thumbnails for the printer screen (CORE One: QOI + PNG)', /; thumbnail_QOI begin 16x16 \d+/.test(tt) && /; thumbnail begin 640x480 \d+/.test(tt));
+
+    // Pause / colour change from the preview.
+    await op.fill('#layerSlider', '10');
+    await op.dispatchEvent('#layerSlider', 'input');
+    await op.click('#addPauseBtn');
+    await op.fill('#layerSlider', '20');
+    await op.dispatchEvent('#layerSlider', 'input');
+    await op.click('#addColourBtn');
+    await op.waitForTimeout(200);
+    check('pauses listed in the preview', (await op.$$('#markerList li')).length === 2);
+    await op.screenshot({ path: path.join(OUT, '22-pause-colour.png') });
+    const [pd] = await Promise.all([op.waitForEvent('download'), op.click('#downloadBtn')]);
+    const pg = fs.readFileSync(await pd.path(), 'utf8');
+    const lines = pg.split('\n');
+    const pi = lines.findIndex((l) => l.startsWith('; PAUSE_PRINT'));
+    const ci = lines.findIndex((l) => l.startsWith('; COLOR_CHANGE'));
+    check('pause and colour change are in the G-code at their layers', pi > 0 && lines[pi + 1] === 'M601' && ci > pi && lines[ci + 1] === 'M600'
+      && lines[pi - 1].startsWith(';Z:') && lines[ci - 1].startsWith(';Z:'), [lines[pi - 1], lines[pi], lines[pi + 1], lines[ci - 1], lines[ci + 1]].join(' | '));
+    await octx.close();
+
+    // Bambu: thumbnail picture and pause inside the .gcode.3mf.
+    const bctx2 = await browser.newContext({ viewport: { width: 1400, height: 860 }, acceptDownloads: true });
+    const bp2 = await bctx2.newPage();
+    bp2.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
+    await bp2.goto(`http://localhost:${port}/`);
+    await bp2.waitForFunction(() => document.getElementById('engineStatus').textContent.includes('ready'), null, { timeout: 20000 });
+    await bp2.waitForFunction(() => document.getElementById('printerSelect').options.length > 0);
+    await bp2.selectOption('#vendorSelect', 'BBL');
+    await bp2.waitForTimeout(500);
+    await bp2.selectOption('#printerSelect', 'Bambu Lab X1 Carbon 0.4 nozzle');
+    await bp2.waitForTimeout(500);
+    await bp2.setInputFiles('#modelFile', [path.join(models, 'tall-box.stl')]);
+    await bp2.waitForFunction(() => !document.getElementById('sliceBtn').disabled, null, { timeout: 15000 });
+    await bp2.click('#sliceBtn');
+    await bp2.waitForSelector('#download3mfBtn:not([disabled])', { state: 'visible', timeout: 30000 });
+    await bp2.fill('#layerSlider', '15');
+    await bp2.dispatchEvent('#layerSlider', 'input');
+    await bp2.click('#addPauseBtn');
+    await bp2.waitForTimeout(400);
+    const [b3] = await Promise.all([bp2.waitForEvent('download'), bp2.click('#download3mfBtn')]);
+    const pkg = unzip(fs.readFileSync(await b3.path()));
+    const pgc = pkg['Metadata/plate_1.gcode']?.toString() || '';
+    check('Bambu package has the plate picture and the pause', 'Metadata/plate_1.png' in pkg && pgc.includes('; PAUSE_PRINT') && pgc.includes('M400 U1')
+      && pgc.includes('; thumbnail begin 300x300'), Object.keys(pkg).join(', '));
+    await bctx2.close();
+  }
+
   // Undo / redo across the Prepare view.
   {
     const uctx = await browser.newContext({ viewport: { width: 1400, height: 860 } });

@@ -294,6 +294,56 @@ export class Viewer extends EventTarget {
     this.updateObject(item);
   }
 
+  /** Show the cut plane at height h (printer coordinates) through a model, or hide it (id null). */
+  showCutPlane(id, h) {
+    const o = id && this.objects.get(id);
+    this.cutPlane.visible = !!o && this.mode === 'prepare';
+    if (!this.cutPlane.visible) { this.needsRender = true; return; }
+    const b = this.worldBox(id);
+    const size = b.getSize(new THREE.Vector3());
+    this.cutPlane.position.set((b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2, h);
+    this.cutPlane.scale.set(Math.max(10, size.x * 1.3), Math.max(10, size.y * 1.3), 1);
+    this.needsRender = true;
+  }
+
+  clearMeasure() {
+    this.measurePoints = [];
+    this.#drawMeasure();
+  }
+
+  #drawMeasure() {
+    for (const c of [...this.measureGroup.children]) { c.geometry?.dispose(); c.material?.dispose(); }
+    this.measureGroup.clear();
+    const pts = this.measurePoints;
+    const size = Math.max(0.6, (this.bed?.width || 200) / 250);
+    for (const p of pts) {
+      const dot = new THREE.Mesh(new THREE.SphereGeometry(size, 16, 12), new THREE.MeshBasicMaterial({ color: 0xffd23f, depthTest: false }));
+      dot.position.copy(p);
+      dot.renderOrder = 12;
+      dot.raycast = () => {};
+      this.measureGroup.add(dot);
+    }
+    if (pts.length === 2) {
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0xffd23f, depthTest: false }));
+      line.renderOrder = 12;
+      line.raycast = () => {};
+      this.measureGroup.add(line);
+    }
+    this.needsRender = true;
+    const d = pts.length === 2 ? pts[1].clone().sub(pts[0]) : null;
+    this.dispatchEvent(new CustomEvent('measure', { detail: { count: pts.length, d: d && [Math.abs(d.x), Math.abs(d.y), Math.abs(d.z)], length: d ? d.length() : 0 } }));
+  }
+
+  #measureClick() {
+    const visible = this.modelGroup.children.filter((m) => m.visible);
+    const hit = this.raycaster.intersectObjects(visible, false).find((h) => h.object.userData.id)
+      || this.raycaster.intersectObjects(this.bedGroup.children, true).find((h) => h.object.userData.plateId);
+    if (!hit) return;
+    if (this.measurePoints.length >= 2) this.measurePoints = [];
+    this.measurePoints.push(hit.point.clone());
+    this.#drawMeasure();
+  }
+
   /** A painting tool (colour or supports) is active. */
   get isPainting() {
     return this.tool === 'paint' || this.tool === 'supports';
@@ -493,7 +543,9 @@ export class Viewer extends EventTarget {
   setTool(tool) {
     const wasSupports = this.tool === 'supports';
     this.tool = tool;
-    this.renderer.domElement.style.cursor = tool === 'layflat' || this.isPainting ? 'crosshair' : '';
+    this.renderer.domElement.style.cursor = tool === 'layflat' || tool === 'measure' || this.isPainting ? 'crosshair' : '';
+    if (tool !== 'measure') this.clearMeasure();
+    if (tool !== 'cut') this.showCutPlane(null);
     if (!this.isPainting && this.brushCursor) this.brushCursor.visible = false;
     if (wasSupports !== (tool === 'supports')) {
       // Switch every model between colour paint and support paint display.
@@ -536,6 +588,20 @@ export class Viewer extends EventTarget {
     this.brushCursor.raycast = () => {};
     this.scene.add(this.brushCursor);
     this.brushRadius = 2;
+    // Measure tool: two points and the line between them.
+    this.measureGroup = new THREE.Group();
+    this.measureGroup.renderOrder = 12;
+    this.scene.add(this.measureGroup);
+    this.measurePoints = [];
+    // Cut tool: a see-through plane at the cut height.
+    this.cutPlane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ color: 0xf2a33a, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false }));
+    const rim = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(1, 1)), new THREE.LineBasicMaterial({ color: 0xf2a33a }));
+    this.cutPlane.add(rim);
+    this.cutPlane.visible = false;
+    this.cutPlane.raycast = () => {};
+    rim.raycast = () => {};
+    this.scene.add(this.cutPlane);
     this.hud = document.createElement('div');
     this.hud.className = 'rotate-hud';
     this.hud.hidden = true;
@@ -650,6 +716,11 @@ export class Viewer extends EventTarget {
           el.setPointerCapture(event.pointerId);
           return;
         }
+      }
+      if (this.tool === 'measure') {
+        this.#measureClick();
+        downAt = null;
+        return;
       }
       if (this.isPainting) {
         const hit = this.#modelHit();
@@ -966,6 +1037,67 @@ export class Viewer extends EventTarget {
 
   snapshot() {
     return this.renderer.domElement.toDataURL('image/png');
+  }
+
+  /**
+   * A picture of one plate's models for printer screens: w x h pixels, seen
+   * from the front like OrcaSlicer's thumbnails, on a transparent background.
+   * Returns an ImageData (top row first) or null when the plate is empty.
+   */
+  renderThumbnail(plateId, w, h) {
+    const objs = [...this.objects.values()].filter((o) => o.item.plateId === plateId);
+    if (!objs.length) return null;
+    const box = new THREE.Box3();
+    for (const o of objs) box.union(this.worldBox(o.item.id));
+    const center = box.getCenter(new THREE.Vector3());
+    const radius = Math.max(1, 0.5 * box.getSize(new THREE.Vector3()).length());
+    const cam = new THREE.PerspectiveCamera(30, w / h, 0.1, 100000);
+    cam.up.set(0, 0, 1);
+    const vfov = THREE.MathUtils.degToRad(cam.fov);
+    const hfov = 2 * Math.atan(Math.tan(vfov / 2) * cam.aspect);
+    const dist = (radius / Math.sin(Math.min(vfov, hfov) / 2)) * 1.02;
+    cam.position.copy(center).addScaledVector(new THREE.Vector3(-0.35, -1, 0.75).normalize(), dist);
+    cam.near = dist / 100;
+    cam.far = dist * 10;
+    cam.lookAt(center);
+    cam.updateProjectionMatrix();
+    // Only these models, without highlights, support boxes or helpers.
+    const hidden = [];
+    const hide = (obj) => { if (obj.visible) { obj.visible = false; hidden.push(obj); } };
+    for (const c of this.scene.children) if (c !== this.modelGroup && !c.isLight) hide(c);
+    for (const o of this.objects.values()) {
+      if (o.item.plateId !== plateId) hide(o.mesh);
+      for (const m of o.modifiers.values()) hide(m);
+    }
+    const shown = !this.modelGroup.visible;
+    this.modelGroup.visible = true;
+    const emissive = objs.map((o) => o.mesh.material.emissive.getHex());
+    objs.forEach((o) => o.mesh.material.emissive.setHex(0));
+    const bg = this.scene.background;
+    this.scene.background = null;
+    const clear = this.renderer.getClearAlpha();
+    this.renderer.setClearAlpha(0);
+    const target = new THREE.WebGLRenderTarget(w, h, { samples: 4 });
+    const pixels = new Uint8Array(w * h * 4);
+    try {
+      this.renderer.setRenderTarget(target);
+      this.renderer.clear();
+      this.renderer.render(this.scene, cam);
+      this.renderer.readRenderTargetPixels(target, 0, 0, w, h, pixels);
+    } finally {
+      this.renderer.setRenderTarget(null);
+      target.dispose();
+      this.renderer.setClearAlpha(clear);
+      this.scene.background = bg;
+      objs.forEach((o, i) => o.mesh.material.emissive.setHex(emissive[i]));
+      if (shown) this.modelGroup.visible = false;
+      for (const obj of hidden) obj.visible = true;
+      this.needsRender = true;
+    }
+    // WebGL reads bottom row first.
+    const img = new ImageData(w, h);
+    for (let y = 0; y < h; y++) img.data.set(pixels.subarray((h - 1 - y) * w * 4, (h - y) * w * 4), y * w * 4);
+    return img;
   }
 }
 
