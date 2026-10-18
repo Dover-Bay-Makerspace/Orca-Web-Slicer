@@ -450,6 +450,34 @@ try {
   await page.waitForTimeout(300);
   check('picking another print profile drops its old changes', (await page.$eval('#qInfill', (i) => i.value)) !== '35');
 
+  // Light/dark switch (system is light in this context).
+  {
+    const tctx = await browser.newContext({ viewport: { width: 1400, height: 860 }, colorScheme: 'light' });
+    const tp = await tctx.newPage();
+    await tp.goto(`http://localhost:${port}/`);
+    await tp.waitForFunction(() => document.getElementById('engineStatus').textContent.includes('ready'));
+    const bg = () => tp.evaluate(() => getComputedStyle(document.body).backgroundColor);
+    const light = await bg();
+    await tp.click('[data-theme-choice="dark"]');
+    const dark = await bg();
+    check('Dark switch turns the page dark on a light computer', light !== dark && dark === 'rgb(20, 24, 29)', `${light} -> ${dark}`);
+    await tp.setInputFiles('#modelFile', [path.join(models, 'tall-box.stl')]);
+    await tp.waitForTimeout(500);
+    await tp.screenshot({ path: path.join(OUT, '12-dark-switch.png') });
+    await tp.reload();
+    await tp.waitForTimeout(500);
+    check('theme choice remembered after reload', (await bg()) === dark && (await tp.$eval('[data-theme-choice="dark"]', (b) => b.getAttribute('aria-pressed'))) === 'true');
+    await tp.click('[data-theme-choice="auto"]');
+    check('Auto follows the computer again', (await bg()) === light);
+    const dctx = await browser.newContext({ viewport: { width: 800, height: 600 }, colorScheme: 'dark' });
+    const dp = await dctx.newPage();
+    await dp.goto(`http://localhost:${port}/`);
+    await dp.click('[data-theme-choice="light"]');
+    check('Light switch turns the page light on a dark computer', (await dp.evaluate(() => getComputedStyle(document.body).backgroundColor)) === light);
+    await tctx.close();
+    await dctx.close();
+  }
+
   // Dark mode + phone layout screenshots.
   const dark = await browser.newContext({ viewport: { width: 1400, height: 860 }, colorScheme: 'dark' });
   const p2 = await dark.newPage();

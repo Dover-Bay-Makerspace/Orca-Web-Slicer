@@ -7,6 +7,10 @@
   <meta name="description" content="OrcaSlicer running in your browser. Slice 3D models into G-code without installing anything; files never leave your computer.">
   <!-- Adds the cross-origin isolation headers on hosts that can't set them (e.g. GitHub Pages). -->
   <script src="coi-serviceworker.min.js"></script>
+  <!-- Apply the saved light/dark choice before anything is drawn (no flash). -->
+  <script>
+    try { var t = localStorage.getItem('orcaweb.theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23e8892b'/%3E%3Cpath d='M7 23h18M9 19h14M11 15h10M13 11h6' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="css/app.css">
   <script type="importmap">
@@ -25,6 +29,11 @@
         <button id="openBtn" class="ghost" type="button" title="Open an OrcaSlicer project (.3mf) with its plates and settings">Open project…</button>
         <button id="saveBtn" class="ghost" type="button" title="Save all plates and settings as an OrcaSlicer project (.3mf)" disabled>Save project</button>
         <input id="projectFile" type="file" accept=".3mf" hidden>
+      </div>
+      <div class="theme-switch" role="group" aria-label="Colour theme" id="themeSwitch">
+        <button type="button" data-theme-choice="auto" title="Follow this computer's light/dark setting">Auto</button>
+        <button type="button" data-theme-choice="light" title="Always light">Light</button>
+        <button type="button" data-theme-choice="dark" title="Always dark">Dark</button>
       </div>
       <span id="engineStatus" class="pill pill-wait" title="Slicing engine status">Engine loading…</span>
       <button id="aboutBtn" class="ghost" type="button">About</button>

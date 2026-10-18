@@ -1906,6 +1906,18 @@ ui.fitBtn.onclick = () => {
 };
 ui.aboutBtn.onclick = () => ui.aboutDialog.showModal();
 
+// Light / dark / follow the computer.
+function setTheme(choice) {
+  if (choice === 'light' || choice === 'dark') document.documentElement.dataset.theme = choice;
+  else delete document.documentElement.dataset.theme;
+  try { localStorage.setItem('orcaweb.theme', choice); } catch { /* not remembered */ }
+  for (const b of document.querySelectorAll('[data-theme-choice]')) b.setAttribute('aria-pressed', String(b.dataset.themeChoice === choice));
+  viewer.applyTheme();
+  if (viewer.previewData) renderLegend();
+}
+for (const b of document.querySelectorAll('[data-theme-choice]')) b.onclick = () => setTheme(b.dataset.themeChoice);
+setTheme(document.documentElement.dataset.theme || 'auto');
+
 ui.addPlateBtn.onclick = () => { const p = addPlate(); setActivePlate(p.id); };
 ui.delPlateBtn.onclick = deletePlate;
 ui.objPlate.onchange = () => moveSelectedToPlate(ui.objPlate.value);

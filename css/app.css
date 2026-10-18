@@ -20,8 +20,10 @@
   color-scheme: light;
 }
 
+/* Dark colours: used when the computer is set to dark mode (unless the
+   page is switched to Light), or when the page is switched to Dark. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #14181d;
     --surface: #1c2127;
     --surface-2: #232931;
@@ -41,6 +43,27 @@
     --shadow: none;
     color-scheme: dark;
   }
+}
+
+:root[data-theme="dark"] {
+  --bg: #14181d;
+  --surface: #1c2127;
+  --surface-2: #232931;
+  --border: #2f3740;
+  --text: #e6e9ec;
+  --muted: #9aa5b1;
+  --accent: #f0963c;
+  --accent-strong: #ffad5c;
+  --accent-text: #1b1206;
+  --danger: #ff6b5e;
+  --ok: #5fc883;
+  --focus: #5aa2ff;
+  --viewport-bg: #181c21;
+  --bed-plate: #2a3037;
+  --bed-grid: #38414a;
+  --bed-edge: #6b7682;
+  --shadow: none;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -430,3 +453,8 @@ button.secondary:hover:not(:disabled) { background: color-mix(in srgb, var(--acc
 .legend-item.off { opacity: .45; text-decoration: line-through; }
 .legend-hint { color: var(--muted); font-size: 11px; margin-top: 2px; }
 .fit-btn { order: 3; }
+
+/* ---------- theme switch ---------- */
+.theme-switch { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; padding: 2px; gap: 2px; }
+.theme-switch button { border: 0; background: transparent; padding: 3px 8px; font-size: 12px; border-radius: 6px; color: var(--muted); }
+.theme-switch button[aria-pressed="true"] { background: var(--surface-2); color: var(--text); font-weight: 600; }
