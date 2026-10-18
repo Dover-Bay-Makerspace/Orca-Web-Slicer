@@ -372,7 +372,8 @@ async function initProfiles() {
   ui.vendorSelect.replaceChildren(...state.index.vendors.map((v) => option(v.name, v.name)));
   const wanted = state.saved.vendor && state.index.vendors.some((v) => v.name === state.saved.vendor)
     ? state.saved.vendor
-    : (state.index.vendors.find((v) => v.name === 'Prusa') || state.index.vendors[0]).name;
+    : (state.index.vendors.find((v) => v.name === 'My printers') || state.index.vendors.find((v) => v.name === 'Prusa')
+      || state.index.vendors[0]).name;
   ui.vendorSelect.value = wanted;
   for (const t of ['machine', 'process', 'filament']) {
     state.userPresets[t] = Array.isArray(state.saved.userPresets?.[t]) ? state.saved.userPresets[t] : [];
@@ -856,6 +857,86 @@ async function importPresets(files) {
   });
   settingsChanged();
   showMessage(`Imported: ${added.join(', ')}. Pick them under "Imported" in the lists.`);
+}
+
+/**
+ * Save the current printer, print or filament settings (preset + changes) as
+ * an OrcaSlicer preset file. The file only lists what differs from the preset
+ * it is based on, like presets saved in desktop OrcaSlicer, so it can go in
+ * the site's custom-printers folder or be imported in OrcaSlicer.
+ */
+async function savePresetFile(type, slotIndex = 0) {
+  const label = { machine: 'printer', process: 'print settings', filament: 'filament' }[type];
+  const slot = state.slots[Math.min(slotIndex, state.slots.length - 1)];
+  let selected = type === 'machine' ? ui.printerSelect.value : type === 'process' ? ui.processSelect.value : slot.value;
+  let own = {};
+  if (selected.startsWith('lib:')) selected = selected.slice(4);
+  if (selected.startsWith('user:')) {
+    const u = state.userPresets[type].find((x) => 'user:' + x.name === selected);
+    own = { ...u.data };
+    selected = u.data.inherits || '';
+  }
+  const current = type === 'machine' ? state.printer.name : type === 'process' ? state.processName : slot.name;
+  let name = prompt(`Name for this ${label} preset:`, current.endsWith('(custom)') ? current : `${current} (custom)`);
+  if (name === null) return;
+  name = name.trim().replace(/[\\/:*?"<>|]+/g, '-');
+  if (!name || name === selected) name = `${selected || current} (custom)`;
+
+  // Current values: the selected preset plus this page's changes for that tab.
+  const tabOf = (k) => state.keyTab.get(k);
+  let now;
+  if (type === 'machine') now = effectiveMachine();
+  else if (type === 'process') {
+    now = { ...state.process };
+    for (const [k, v] of Object.entries(state.overrides)) if (tabOf(k) === 'process' || (!tabOf(k) && k in state.process)) now[k] = v;
+  } else {
+    const i = state.slots.indexOf(slot);
+    now = { ...slot.settings };
+    for (const [k, v] of Object.entries(state.overrides)) {
+      if (tabOf(k) !== 'filament' && !(k in slot.settings)) continue;
+      now[k] = Array.isArray(v) ? [v[Math.min(i, v.length - 1)]] : v;
+    }
+  }
+  let parent = {};
+  if (selected) {
+    try { parent = await resolveUserPreset({ type, name, inherits: selected }); } catch { selected = ''; }
+  }
+  const preset = { type, name, inherits: selected, from: 'User', instantiation: 'true' };
+  for (const [k, v] of Object.entries({ ...own, ...now })) {
+    if (METADATA_KEYS.has(k) || k.startsWith('_') || k === 'default_filament_colour') continue;
+    if (selected && JSON.stringify(v) === JSON.stringify(parent[k])) continue;
+    preset[k] = v;
+  }
+  if (!selected) {
+    // Not based on a published preset: keep the parts that say what it fits.
+    for (const k of ['printer_model', 'printer_variant', 'printer_technology', 'compatible_printers', 'compatible_printers_condition']) {
+      if (now[k] !== undefined) preset[k] = now[k];
+    }
+  }
+  const file = name.replace(/\s+/g, '_') + '.json';
+  downloadBytes(new TextEncoder().encode(JSON.stringify(preset, null, 2)), file, 'application/json');
+
+  // Use it in this browser straight away, under "Imported".
+  const entry = { name, vendor: state.vendor.vendor, data: preset };
+  state.userPresets[type] = state.userPresets[type].filter((u) => u.name !== name).concat(entry);
+  if (type === 'machine') {
+    await selectVendor(state.vendor.vendor, {
+      printer: 'user:' + name, process: ui.processSelect.value, restoring: true,
+      slots: state.slots.map((x) => ({ value: x.value, colour: x.colour, nozzle: x.nozzle })),
+    });
+    clearOverrides('machine');
+  } else if (type === 'process') {
+    fillProcesses('user:' + name);
+    await selectProcess('user:' + name);
+  } else {
+    buildFilamentOptions();
+    await setSlotPreset(slot, 'user:' + name);
+  }
+  settingsChanged();
+  save();
+  editor?.render();
+  showMessage(`Saved ${file}. It's now under "Imported" in this browser. To give it to everyone, ` +
+    'upload it to the custom-printers folder of the site\'s GitHub repository.');
 }
 
 function guessType(preset) {
@@ -1855,6 +1936,7 @@ async function initEditor() {
     slots: () => state.slots.map((_, i) => slotLabel(i)),
     otherCount: () => Object.keys(state.overrides).filter((k) => !state.keyTab.has(k)).length,
     clearOther: () => { for (const k of Object.keys(state.overrides)) if (!state.keyTab.has(k)) delete state.overrides[k]; },
+    savePreset: (type, slot) => withBusy(() => savePresetFile(type, slot).catch((e) => showMessage(errorText(e), 'error')))(),
   });
   ui.advPanel.addEventListener('close', () => ui.advBtn.focus());
 }

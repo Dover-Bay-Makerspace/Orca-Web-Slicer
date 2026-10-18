@@ -10,9 +10,11 @@ themselves (SD card, USB stick, or the printer's own web page).
 
 - **Slicing engine:** OrcaSlicer v2.4.2 (latest stable) compiled to
   WebAssembly by the [OrcaWeb](https://github.com/Hiosdra/OrcaWeb) project.
-- **Profiles:** OrcaSlicer's own library. That covers 64 brands, about 1,000
-  printers, about 2,900 process presets and about 5,900 filament presets.
+- **Profiles:** OrcaSlicer's own library (64 brands and about 1,000 printers
+  are available). The site is set to Bambu, Snapmaker, Prusa and OrcaSlicer's
+  generic "Custom" printers; see **Printer brands** below to change that.
   Each printer only offers the presets OrcaSlicer marks as compatible with it.
+  Your own printers go in `custom-printers/` and appear as **My printers**.
 - **File types:** STL, 3MF (geometry), OBJ and STEP.
 - **Plate tools:** move by dragging, rotate 90°, scale, copy, delete,
   OrcaSlicer's **Arrange** and **Auto-orient**.
@@ -140,10 +142,22 @@ Hover over the pill to see the full error message.
 - **Settings:** changes in Advanced settings are remembered in that browser.
   Picking a different printer, filament or print profile clears the changes
   for that part only, like switching presets in the desktop app.
-- **Custom printer settings:** in desktop OrcaSlicer, export your tuned
-  printer, filament or process preset as `.json`, then use **Import OrcaSlicer
-  preset…** on the site. Imported presets are remembered in that browser only,
-  so each PC needs them imported once.
+- **Printer brands:** the `PRINTER_BRANDS` line near the top of
+  `.github/workflows/deploy.yml` lists the brands students can choose from
+  (now `"Bambu, Snapmaker, Prusa, Custom"`). To add one, edit that file on
+  GitHub (pencil icon), add the brand name, e.g. `Creality`, and commit. Use
+  `""` for every brand. Unknown names are skipped and listed in the deploy log.
+- **Custom printers for everyone:** pick the closest printer, change what is
+  different in **Advanced settings → Printer** (bed size, height, start
+  G-code…), then click **Save printer as file…**. Upload that `.json` file to
+  the `custom-printers` folder in the repository; after the deploy, it
+  appears for every student under the brand **My printers**, which is
+  listed first and picked by default. The same works for print settings
+  and filaments (they show up for the printers they fit). Presets and
+  bundles exported from desktop OrcaSlicer (`.json`, `.orca_printer`,
+  `.orca_filament`) also work. See `custom-printers/README.md`.
+- **Presets for one PC only:** **Import OrcaSlicer preset…** adds a `.json`
+  preset to that browser only.
 
 ## Updating to a newer OrcaSlicer
 
@@ -153,8 +167,8 @@ OrcaWeb publishes a new engine some time after each OrcaSlicer release.
 
 The **Run workflow** form also has two optional boxes:
 - **Engine release tag**: pin a specific engine version.
-- **Printer brands**: limit the site to certain brands, for example
-  `Prusa,Creality,BBL`, to make it lighter.
+- **Printer brands**: use different brands for this one run, for example
+  `Prusa, Creality, Bambu` (blank uses the `PRINTER_BRANDS` line).
 
 ---
 
@@ -171,6 +185,7 @@ coi-serviceworker.min.js    supplies the required headers on GitHub Pages
 tools/fetch-engine.sh/.ps1  download the engine
 tools/build-profiles.py     build profiles/ from an OrcaSlicer checkout
 tools/build-settings-schema.py  build settings-schema.json (Advanced settings) from OrcaSlicer's source
+custom-printers/            your own printer/print/filament presets ("My printers")
 tools/serve.py              local test server with the right headers
 .github/workflows/deploy.yml  GitHub Pages build and publish
 tests/                      headless browser test with a stand-in engine
@@ -210,7 +225,8 @@ To run an OrcaSlicer version that OrcaWeb hasn't published yet:
 ### Tests
 
 `node tests/ui-test.mjs` runs the interface in headless Chromium against a
-stand-in engine. It needs Playwright.
+stand-in engine. It needs Playwright. Add `--orca-src <OrcaSlicer checkout>`
+to also test the custom-printers build.
 
 ## Licence
 

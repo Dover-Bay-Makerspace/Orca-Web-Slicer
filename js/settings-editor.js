@@ -99,6 +99,13 @@ export class SettingsEditor {
     resetAll.type = 'button';
     resetAll.onclick = () => this.resetAll();
     this.foot.append(this.changedText, resetTab, resetAll);
+    if (this.model.savePreset) {
+      // Turns the current settings into an OrcaSlicer preset file (e.g. a custom printer).
+      this.saveBtn = el('button', 'secondary adv-save', 'Save as preset file…');
+      this.saveBtn.type = 'button';
+      this.saveBtn.onclick = () => this.model.savePreset(this.query ? 'machine' : this.tab, this.slot);
+      this.foot.append(this.saveBtn);
+    }
 
     const note = el('p', 'hint adv-note',
       'Changes apply to your next slice. Settings in bold differ from the selected profile; ↺ puts one back.');
@@ -164,6 +171,10 @@ export class SettingsEditor {
     this.slotSelect.replaceChildren(...slots.map((label, i) => new Option(label, String(i))));
     this.slotSelect.value = String(this.slot);
     this.content.innerHTML = '';
+    if (this.saveBtn) {
+      this.saveBtn.hidden = !!this.query;
+      this.saveBtn.textContent = { machine: 'Save printer as file…', process: 'Save print settings as file…', filament: 'Save filament as file…' }[this.tab];
+    }
     this.#renderCounts();
     if (this.query) {
       this.#renderSearch();

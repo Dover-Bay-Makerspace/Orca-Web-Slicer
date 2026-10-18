@@ -410,6 +410,8 @@ button.secondary:hover:not(:disabled) { background: color-mix(in srgb, var(--acc
 .adv-field .reset { font-size: 15px; }
 .adv-foot { display: flex; gap: 16px; align-items: center; padding: 10px 0; border-top: 1px solid var(--border); }
 .adv-foot .hint { margin: 0; flex: 1; }
+.adv-foot button.adv-save { width: auto; flex: none; padding: 6px 12px; }
+.adv-foot { flex-wrap: wrap; }
 
 @media (max-width: 820px) {
   .adv { top: 0; width: 100vw; padding: 12px; }

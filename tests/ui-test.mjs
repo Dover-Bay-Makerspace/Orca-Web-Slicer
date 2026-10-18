@@ -2,7 +2,7 @@
 //   node tests/ui-test.mjs [--out dir] [--orca-samples dir-with-3mf-files]
 // Needs Playwright (npm i -g playwright) and python3.
 import { createRequire } from 'node:module';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,6 +17,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (name, def) => (process.argv.includes(name) ? process.argv[process.argv.indexOf(name) + 1] : def);
 const OUT = arg('--out', path.join(os.tmpdir(), 'orcaweb-test'));
 const SAMPLES = arg('--orca-samples', null);
+const ORCA_SRC = arg('--orca-src', null); // OrcaSlicer checkout, for the custom-printers build test
 fs.mkdirSync(OUT, { recursive: true });
 
 // Site copy: everything linked, engine/ replaced with the mock.
@@ -476,6 +477,86 @@ try {
     check('Light switch turns the page light on a dark computer', (await dp.evaluate(() => getComputedStyle(document.body).backgroundColor)) === light);
     await tctx.close();
     await dctx.close();
+  }
+
+  // Save a changed printer as a preset file, then publish it (with another
+  // custom printer) through the custom-printers folder.
+  {
+    const sctx = await browser.newContext({ viewport: { width: 1400, height: 860 }, acceptDownloads: true });
+    const sp = await sctx.newPage();
+    sp.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
+    sp.on('dialog', (d) => d.accept(d.type() === 'prompt' ? 'Classroom MK3S short' : undefined));
+    await sp.goto(`http://localhost:${port}/`);
+    await sp.waitForFunction(() => document.getElementById('printerSelect').options.length > 0, null, { timeout: 15000 });
+    await sp.selectOption('#printerSelect', 'Prusa MK3S 0.4 nozzle');
+    await sp.waitForTimeout(400);
+    await sp.click('#advBtn');
+    await sp.click('.adv-tabs .tab[data-tab="machine"]');
+    for (const b of await sp.$$('.adv-page')) { await b.click(); if (await sp.$('#adv-printable_height')) break; }
+    await sp.fill('#adv-printable_height', '150');
+    await sp.dispatchEvent('#adv-printable_height', 'change');
+    check('Printer tab offers "Save printer as file"', (await sp.textContent('.adv-save')) === 'Save printer as file…');
+    const [saved] = await Promise.all([sp.waitForEvent('download'), sp.click('.adv-save')]);
+    const savedPath = path.join(OUT, saved.suggestedFilename());
+    await saved.saveAs(savedPath);
+    const preset = JSON.parse(fs.readFileSync(savedPath, 'utf8'));
+    check('saved printer file is an OrcaSlicer preset with only the change', preset.type === 'machine' && preset.name === 'Classroom MK3S short'
+      && preset.inherits === 'Prusa MK3S 0.4 nozzle' && String(preset.printable_height) === '150' && !('printable_area' in preset)
+      && Object.keys(preset).length <= 7, JSON.stringify(preset).slice(0, 300));
+    await sp.waitForTimeout(400);
+    check('saved printer is selected in this browser', (await sp.$eval('#printerSelect', (s) => s.value)) === 'user:Classroom MK3S short'
+      && /250 × 210 × 150/.test(await sp.$eval('#bedInfo', (e) => e.textContent)) && !/changed/.test(await sp.$eval('#advCount', (e) => e.textContent)),
+      await sp.$eval('#bedInfo', (e) => e.textContent));
+    await sp.click('.adv-tabs .tab[data-tab="filament"]');
+    check('Filament tab offers "Save filament as file"', (await sp.textContent('.adv-save')) === 'Save filament as file…');
+    await sctx.close();
+
+    if (ORCA_SRC) {
+      const custom = path.join(OUT, 'custom-printers');
+      fs.rmSync(custom, { recursive: true, force: true });
+      fs.mkdirSync(custom);
+      fs.copyFileSync(savedPath, path.join(custom, path.basename(savedPath)));
+      fs.writeFileSync(path.join(custom, 'corexy.json'), JSON.stringify({ type: 'machine', name: 'Makerspace CoreXY', inherits: 'MyKlipper 0.4 nozzle',
+        printable_area: ['0x0', '235x0', '235x220', '0x220'], printable_height: '230' }));
+      fs.writeFileSync(path.join(custom, 'README.md'), 'not a preset');
+      const built = path.join(OUT, 'profiles-custom');
+      const log = execFileSync('python3', [path.join(ROOT, 'tools/build-profiles.py'), '--orca', ORCA_SRC, '--out', built,
+        '--vendors', 'Prusa, Custom', '--custom', custom], { encoding: 'utf8' });
+      fs.unlinkSync(path.join(site, 'profiles'));
+      fs.symlinkSync(built, path.join(site, 'profiles'));
+      const cctx = await browser.newContext({ viewport: { width: 1400, height: 860 }, acceptDownloads: true });
+      const cp = await cctx.newPage();
+      cp.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
+      await cp.goto(`http://localhost:${port}/`);
+      await cp.waitForFunction(() => document.getElementById('printerSelect').options.length > 0, null, { timeout: 15000 });
+      const brands = await cp.$$eval('#vendorSelect option', (o) => o.map((x) => x.value));
+      check('custom printers are the first brand and picked by default', brands.join(',') === 'My printers,Custom,Prusa'
+        && (await cp.$eval('#vendorSelect', (s) => s.value)) === 'My printers', brands.join(',') + ' / ' + log.trim().split('\n').slice(-2).join(' '));
+      const printers = await cp.$$eval('#printerSelect option', (o) => o.map((x) => x.value));
+      check('both custom printers listed', printers.join(',') === 'Classroom MK3S short,Makerspace CoreXY', printers.join(','));
+      await cp.selectOption('#printerSelect', 'Makerspace CoreXY');
+      await cp.waitForTimeout(400);
+      check('custom printer uses its own bed and its base printer\'s print settings',
+        /235 × 220 × 230/.test(await cp.$eval('#bedInfo', (e) => e.textContent))
+        && (await cp.$eval('#processSelect', (s) => s.value)) === '0.20mm Standard @MyKlipper', await cp.$eval('#bedInfo', (e) => e.textContent));
+      await cp.selectOption('#printerSelect', 'Classroom MK3S short');
+      await cp.waitForTimeout(400);
+      check('saved MK3S file works for everyone with MK3S print settings', /250 × 210 × 150/.test(await cp.$eval('#bedInfo', (e) => e.textContent))
+        && (await cp.$eval('#processSelect', (s) => s.value)) === '0.20mm Speed @MK3S 0.4', await cp.$eval('#processSelect', (s) => s.value));
+      await cp.selectOption('#printerSelect', 'Makerspace CoreXY');
+      await cp.waitForTimeout(400);
+      await cp.setInputFiles('#modelFile', [path.join(models, 'tall-box.stl')]);
+      await cp.waitForFunction(() => !document.getElementById('sliceBtn').disabled, null, { timeout: 15000 });
+      await cp.click('#sliceBtn');
+      await cp.waitForSelector('#downloadBtn:not([disabled])', { state: 'visible', timeout: 30000 });
+      const [cg] = await Promise.all([cp.waitForEvent('download'), cp.click('#downloadBtn')]);
+      const cgt = fs.readFileSync(await cg.path(), 'utf8');
+      check('custom printer slices', cgt.includes('; printer_settings_id = Makerspace CoreXY') && cgt.includes('"235x220"'),
+        cgt.split('\n').filter((l) => /printer_settings_id|printable_area/.test(l)).join(' | '));
+      await cctx.close();
+      fs.unlinkSync(path.join(site, 'profiles'));
+      fs.symlinkSync(path.join(ROOT, 'profiles'), path.join(site, 'profiles'));
+    }
   }
 
   // Dark mode + phone layout screenshots.
