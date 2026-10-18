@@ -181,7 +181,13 @@ export class Viewer extends EventTarget {
     geo.setAttribute('position', new THREE.BufferAttribute(item.positions, 3));
     geo.computeVertexNormals();
     geo.computeBoundingBox();
-    const mat = new THREE.MeshStandardMaterial({ color: COLORS.model, roughness: 0.55, metalness: 0.05, flatShading: true });
+    const makeMat = () => new THREE.MeshStandardMaterial({ color: COLORS.model, roughness: 0.55, metalness: 0.05, flatShading: true });
+    let mat = makeMat();
+    if (item.parts) {
+      // A multi-colour model: one material per colour part.
+      mat = item.parts.map(makeMat);
+      item.parts.forEach((p, i) => geo.addGroup(p.start / 3, (p.end - p.start) / 3, i));
+    }
     const mesh = new THREE.Mesh(geo, mat);
     mesh.userData.id = item.id;
     mesh.matrixAutoUpdate = false;
@@ -254,7 +260,7 @@ export class Viewer extends EventTarget {
     if (!o) return;
     this.modelGroup.remove(o.mesh);
     o.mesh.geometry.dispose();
-    o.mesh.material.dispose();
+    for (const m of [].concat(o.mesh.material)) m.dispose();
     this.objects.delete(id);
     if (this.selectedId === id) this.select(null);
   }
@@ -299,12 +305,14 @@ export class Viewer extends EventTarget {
   refreshColors() {
     for (const [id, o] of this.objects) {
       const inside = this.isInside(id);
-      const own = this.colourOf ? this.colourOf(o.item) : null;
-      if (!inside) o.mesh.material.color.setHex(COLORS.outside);
-      else if (own) o.mesh.material.color.set(own);
-      else o.mesh.material.color.setHex(id === this.selectedId ? COLORS.selected : COLORS.model);
-      // The selected model glows orange so it stands out whatever its filament colour.
-      o.mesh.material.emissive.setHex(id === this.selectedId ? 0x7a3c00 : 0x000000);
+      [].concat(o.mesh.material).forEach((mat, part) => {
+        const own = this.colourOf ? this.colourOf(o.item, part) : null;
+        if (!inside) mat.color.setHex(COLORS.outside);
+        else if (own) mat.color.set(own);
+        else mat.color.setHex(id === this.selectedId ? COLORS.selected : COLORS.model);
+        // The selected model glows orange so it stands out whatever its filament colour.
+        mat.emissive.setHex(id === this.selectedId ? 0x7a3c00 : 0x000000);
+      });
       for (const [mid, m] of o.modifiers) {
         const on = mid === this.selectedModifierId;
         m.material.opacity = on ? 0.6 : 0.32;

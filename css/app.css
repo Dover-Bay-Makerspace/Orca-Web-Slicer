@@ -476,3 +476,9 @@ button.tool-toggle[aria-pressed="true"] { background: var(--accent); border-colo
   padding: 3px 8px; border-radius: 6px; font: 600 13px/1.3 system-ui, sans-serif;
   background: rgba(0, 0, 0, 0.75); color: #fff;
 }
+
+/* ---------- colour parts ---------- */
+.part-list { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.part-row { display: grid; grid-template-columns: 14px minmax(0, 1fr) minmax(0, 1.2fr); gap: 6px; align-items: center; font-size: 12px; }
+.part-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.part-row select { min-width: 0; font-size: 12px; }

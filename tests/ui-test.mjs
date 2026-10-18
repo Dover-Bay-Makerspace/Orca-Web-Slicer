@@ -44,6 +44,15 @@ const models = path.join(OUT, 'models');
 fs.mkdirSync(models, { recursive: true });
 fs.writeFileSync(path.join(models, 'tall-box.stl'), boxStl(20, 30, 40, 100, 100, 5)); // off-origin on purpose
 fs.writeFileSync(path.join(models, 'pyramid.stl'), asciiStl);
+// A two-colour key fob: a base plate and raised "letters" (two blocks) sitting on it.
+fs.writeFileSync(path.join(models, 'fob-base.stl'), boxStl(40, 20, 3, 50, 50, 0));
+{
+  // Two boxes in one STL: rebuild the header count for 24 triangles.
+  const a = boxStl(10, 10, 2, 55, 55, 3), b = boxStl(10, 10, 2, 75, 55, 3);
+  const both = Buffer.concat([a.subarray(0, 84), a.subarray(84), b.subarray(84)]);
+  both.writeUInt32LE(24, 80);
+  fs.writeFileSync(path.join(models, 'fob-letters.stl'), both);
+}
 fs.writeFileSync(path.join(models, 'bracket.obj'), 'v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n');
 fs.writeFileSync(path.join(OUT, 'my-mk3s.json'), JSON.stringify({
   type: 'machine', name: 'My MK3S (classroom)', inherits: 'Prusa MK3S 0.4 nozzle', from: 'User', printable_height: '200',
@@ -91,7 +100,7 @@ try {
   const page = await context.newPage();
   page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
   page.on('console', (m) => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
-  page.on('dialog', (d) => d.accept());
+  page.on('dialog', (d) => (/multi-colour/.test(d.message()) ? d.dismiss() : d.accept()));
 
   await page.goto(`http://localhost:${port}/`);
   await page.waitForFunction(() => document.getElementById('engineStatus').textContent.includes('ready'), null, { timeout: 20000 });
@@ -356,8 +365,9 @@ try {
       await mp.setInputFiles('#projectFile', path.join(SAMPLES, 'OrcaSliced.3mf'));
       await mp.waitForFunction(() => /^Opened/.test(document.getElementById('message').textContent), null, { timeout: 30000 });
       const om = await msg(mp);
-      check('Orca sample keeps its colours as separate filaments', (await mp.$$('.slot')).length >= 2
-        && (await mp.$$('#objectList li')).length === 5 && /coloured part/.test(om), om.replace(/\n/g, ' | ').slice(0, 200));
+      const sampleParts = await mp.evaluate(() => window.orcaWeb.state.objects.map((o) => (o.parts ? o.parts.map((p) => p.filament).join('+') : String(o.filament))));
+      check('Orca sample keeps its colours (multi-colour models stay whole)', (await mp.$$('.slot')).length >= 2
+        && sampleParts.length === 3 && sampleParts.some((p) => p.includes('+')), sampleParts.join(', ') + ' | ' + om.replace(/\n/g, ' | ').slice(0, 300));
       await mp.selectOption('#vendorSelect', 'Prusa');
       await mp.waitForTimeout(500);
       await mp.setInputFiles('#projectFile', path.join(SAMPLES, 'OrcaSliced.3mf'));
@@ -539,6 +549,64 @@ try {
     await rp.keyboard.press('Escape');
     check('Escape goes back to moving models', (await rp.getAttribute('#layFlatTool', 'aria-pressed')) === 'false');
     await rctx.close();
+  }
+
+  // Multi-colour model from one STL per colour (Tinkercad style), on an AMS and a tool-changer.
+  {
+    const cctx = await browser.newContext({ viewport: { width: 1400, height: 860 }, acceptDownloads: true });
+    const cp = await cctx.newPage();
+    cp.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
+    let asked = '';
+    cp.on('dialog', (d) => { asked = d.message(); d.accept(); });
+    await cp.goto(`http://localhost:${port}/`);
+    await cp.waitForFunction(() => document.getElementById('engineStatus').textContent.includes('ready'), null, { timeout: 20000 });
+    await cp.waitForFunction(() => document.getElementById('printerSelect').options.length > 0);
+    for (const [vendor, printer, label] of [['Snapmaker', 'Snapmaker U1 (0.4 nozzle)', 'U1'], ['BBL', 'Bambu Lab X1 Carbon 0.4 nozzle', 'AMS']]) {
+      await cp.click('#newBtn');
+      await cp.selectOption('#vendorSelect', vendor);
+      await cp.waitForTimeout(500);
+      const printers = await cp.$$eval('#printerSelect option', (o) => o.map((x) => x.value));
+      await cp.selectOption('#printerSelect', printers.includes(printer) ? printer : printers.find((p) => p.includes('U1')) || printers[0]);
+      await cp.waitForTimeout(500);
+      await cp.setInputFiles('#modelFile', [path.join(models, 'fob-base.stl'), path.join(models, 'fob-letters.stl')]);
+      await cp.waitForFunction(() => document.querySelectorAll('#objectList li').length === 1 && document.querySelectorAll('.part-row').length === 2, null, { timeout: 20000 });
+      const m = await msg(cp);
+      check(`${label}: overlapping files load as one two-colour model`, /multi-colour/.test(asked) && (await cp.$$('.slot')).length >= 2
+        && /2 colour part/.test(m) && /extended down to the bed/.test(m), m.replace(/\n/g, ' | '));
+      const info = await cp.evaluate(() => {
+        const { state, viewer } = window.orcaWeb;
+        const item = state.objects[0];
+        const zs = (p) => { let mn = Infinity, mx = -Infinity; for (let i = 2; i < p.length; i += 3) { mn = Math.min(mn, p[i]); mx = Math.max(mx, p[i]); } return [mn, mx]; };
+        const mats = [].concat(viewer.objects.get(item.id).mesh.material).map((x) => x.color.getHexString());
+        return { parts: item.parts.map((p) => ({ f: p.filament, tris: (p.end - p.start) / 9, z: zs(item.positions.subarray(p.start, p.end)) })), mats };
+      });
+      check(`${label}: letters reach the bed and are cut out of the base`, info.parts[0].f === 1 && info.parts[1].f === 2
+        && info.parts[1].z[0] === 0 && info.parts[1].z[1] === 5 && info.parts[0].z[1] === 3 && info.parts[0].tris > 12 && info.mats[0] !== info.mats[1],
+        JSON.stringify(info));
+      if (label === 'U1') {
+        await cp.click('#fitBtn');
+        await cp.waitForTimeout(400);
+        await cp.screenshot({ path: path.join(OUT, '14-two-colour-fob.png') });
+      }
+      await cp.click('#sliceBtn');
+      await cp.waitForSelector('#downloadBtn:not([disabled])', { state: 'visible', timeout: 30000 });
+      const [dl] = await Promise.all([cp.waitForEvent('download'), cp.click('#downloadBtn')]);
+      const g = fs.readFileSync(await dl.path(), 'utf8');
+      check(`${label}: slices as one object per colour`, g.includes('; objects = 2') && /^T0$/m.test(g) && /^T1$/m.test(g),
+        g.split('\n').filter((l) => /; objects|^T\d/.test(l)).slice(0, 6).join(' | '));
+    }
+    // Changing a part's filament.
+    await cp.click('#addSlotBtn');
+    await cp.waitForTimeout(300);
+    await cp.selectOption('.part-row:nth-child(2) select', '3');
+    check('a colour part can switch filament', await cp.evaluate(() => window.orcaWeb.state.objects[0].parts[1].filament) === 3
+      && (await cp.$$('#objectList .dot')).length === 2);
+    // Arrange keeps the parts together.
+    const before = await cp.evaluate(() => window.orcaWeb.state.objects.length);
+    await cp.click('#arrangeBtn');
+    await cp.waitForTimeout(800);
+    check('arrange moves the colour parts as one model', before === 1 && await cp.evaluate(() => window.orcaWeb.state.objects.length) === 1 && !/failed/i.test(await msg(cp)), await msg(cp));
+    await cctx.close();
   }
 
   // Save a changed printer as a preset file, then publish it (with another

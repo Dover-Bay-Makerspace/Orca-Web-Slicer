@@ -131,12 +131,19 @@ Hover over the pill to see the full error message.
 - **What stays on student PCs:** only normal browser data. That is the cached
   engine (about 30 MB, so later visits load fast), the student's last-used
   printer and settings, and any G-code files they download.
-- **Limits:** each model prints in one filament; colour painting with the
-  brush, painted supports or seams, and per-model setting modifiers aren't
-  available. In desktop projects, coloured parts that stand on the bed become
-  separate models with their own filament; coloured parts set into a model
-  above the bed (such as eyes) use the model's main filament, and the page
-  says so. Adding a .3mf
+- **Multi-colour (AMS, MMU, tool-changers such as the Snapmaker U1):** add
+  the parts of a design together (for example one STL per colour exported
+  from Tinkercad, selected in one go). If they overlap, the page offers to
+  keep them as one model, and each part gets its own filament in the model's
+  panel. Multi-colour 3MF projects load the same way. Overlaps are cut out
+  (the smaller part wins). The engine prints each colour as its own object
+  standing on the bed, so raised details with a flat underside (letters,
+  logos) are extended down to the bed. That means every layer under them
+  uses both colours: quick on a tool-changer, more filament changes and
+  purging on an AMS. Floating parts without a flat underside (eyes set into
+  a head) use the main colour.
+- **Limits:** colour painting with the brush, painted supports or seams, and
+  per-model setting modifiers aren't available. Adding a .3mf
   with **Add model** brings in just its models. Use **Open project…** to also
   load its plates and settings.
 - **Turning models:** select a model, then use **Rotate** (or press R) and

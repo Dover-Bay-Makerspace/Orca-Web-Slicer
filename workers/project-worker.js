@@ -337,20 +337,10 @@ async function readProject(buffer, fallbackBed) {
     }
   }
 
-  function minZ(pos, m) {
-    let mn = Infinity;
-    for (let i = 0; i < pos.length; i += 3) {
-      const z = m[2] * pos[i] + m[6] * pos[i + 1] + m[10] * pos[i + 2] + m[14];
-      if (z < mn) mn = z;
-    }
-    return mn;
-  }
-
   const plateCount = settings.plates.length;
   const bed = printableBounds(config) || fallbackBed;
   const instanceSeen = new Map();
   const groups = new Map();   // build object -> [output objects] (one per filament when parts differ)
-  let floatingParts = 0;
   for (const item of root.items) {
     const path = item.path || rootPath;
     const key = path + '#' + item.objectid;
@@ -364,25 +354,25 @@ async function readProject(buffer, fallbackBed) {
       await collect(path, item.objectid, IDENTITY, 'normal_part', 0, out, objExtruder);
       if (!out.normal.length) { warnings.push(`"${src.name || 'Object ' + item.objectid}" has no printable parts and was skipped.`); continue; }
       const name = (ms && ms.name) || src.name || 'Object ' + item.objectid;
-      // The web engine gives each object one filament. Parts in another filament
-      // become their own objects when they stand on the bed like the model does;
-      // parts that float (e.g. eyes set into a head) stay with the main body.
-      const bottom = Math.min(...out.normal.map((p) => minZ(p.positions, item.matrix)));
+      // Parts in different filaments are kept as colour parts; the page turns
+      // them into one object per colour (see parts-worker.js).
       const byFilament = new Map();
       for (const part of out.normal) {
-        let ext = part.extruder || objExtruder;
-        if (ext !== objExtruder && minZ(part.positions, item.matrix) - bottom > 0.05) { ext = objExtruder; floatingParts++; }
+        const ext = part.extruder || objExtruder;
         if (!byFilament.has(ext)) byFilament.set(ext, []);
         byFilament.get(ext).push(part.positions);
       }
-      const list = [...byFilament.entries()].map(([ext, parts], i) => ({
+      const list = [{
         sourceId: item.objectid,
-        name: byFilament.size > 1 ? `${name} (${i + 1})` : name,
-        filament: ext,
-        positions: concat(parts),
-        modifiers: ext === objExtruder ? out.modifiers : [],
+        name,
+        filament: objExtruder,
+        positions: concat(out.normal.map((p) => p.positions)),
+        colourParts: byFilament.size > 1
+          ? [...byFilament.entries()].map(([ext, parts]) => ({ name: `${name} · filament ${ext}`, filament: ext, positions: concat(parts) }))
+          : null,
+        modifiers: out.modifiers,
         instances: [],
-      }));
+      }];
       groups.set(key, list);
     }
     const instanceId = instanceSeen.get(key) || 0;
@@ -401,7 +391,6 @@ async function readProject(buffer, fallbackBed) {
   const objects = new Map();
   for (const [key, list] of groups) list.forEach((o, i) => objects.set(key + '#' + i, o));
   if (!objects.size) throw new Error('No printable objects were found in this 3MF file.');
-  if (floatingParts) warnings.push(`${floatingParts} coloured part(s) that sit above the bed (such as inlaid details) use their model's main filament; the web engine gives each model one filament.`);
   if (skipped.modifier_part) warnings.push(`${skipped.modifier_part} setting-modifier part(s) were ignored (not supported here).`);
   if (skipped.negative_part) warnings.push(`${skipped.negative_part} negative part(s) were ignored (not supported here).`);
 
@@ -419,6 +408,7 @@ self.onmessage = async (event) => {
     for (const o of project.objects) {
       transfer.push(o.positions.buffer);
       for (const m of o.modifiers) transfer.push(m.positions.buffer);
+      for (const c of o.colourParts || []) transfer.push(c.positions.buffer);
     }
     self.postMessage({ id, ok: true, project }, transfer.filter((b, i, a) => a.indexOf(b) === i));
   } catch (error) {

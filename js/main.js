@@ -33,7 +33,7 @@ const ui = Object.fromEntries([
   'addBtn', 'modelFile', 'arrangeBtn', 'orientBtn', 'rotX', 'rotY', 'rotZ', 'rotateTool', 'layFlatTool', 'rotXDeg', 'rotYDeg', 'rotZDeg', 'rotReset', 'scaleInput', 'dupBtn', 'delBtn', 'viewport',
   'dropHint', 'layerControls', 'layerSlider', 'layerLabel', 'legend', 'objectBar', 'objectList', 'selectionInfo',
   'fitBtn', 'plateBar', 'plateList', 'addPlateBtn', 'delPlateBtn', 'objPanel', 'objName', 'objPlate', 'addEnforcer', 'addBlocker',
-  'modList', 'modEdit', 'modTitle', 'modX', 'modY', 'modZ', 'modW', 'modD', 'modH', 'modDelete',
+  'partSection', 'partList', 'modList', 'modEdit', 'modTitle', 'modX', 'modY', 'modZ', 'modW', 'modD', 'modH', 'modDelete',
 ].map((id) => [id, $(id)]));
 
 // ------------------------------------------------------------------ state --
@@ -235,7 +235,7 @@ function settingLayers(plateIds = state.plates.map((p) => p.id), shift = null) {
     const mult = first(effective('flush_multiplier')) || '1';
     final.flush_multiplier = Array(nozzles).fill(String(mult));
   }
-  const used = new Set(state.objects.filter((o) => plateIds.includes(o.plateId)).map((o) => o.filament));
+  const used = new Set(state.objects.filter((o) => plateIds.includes(o.plateId)).flatMap(itemFilaments));
   let tower = false;
   if (used.size > 1) {
     // A plate with more than one filament needs the prime tower to purge into.
@@ -632,7 +632,10 @@ async function setupSlots(wanted, restoring) {
     state.slots = next;
   };
   if (restoring) { await run(); recomputeFilaments(); renderSlots(); } else await changeSlots(run);
-  for (const item of state.objects) if (item.filament > state.slots.length) item.filament = 1;
+  for (const item of state.objects) {
+    if (item.filament > state.slots.length) item.filament = 1;
+    for (const p of item.parts || []) if (p.filament > state.slots.length) p.filament = 1;
+  }
   if (!restoring) settingsChanged();
 }
 
@@ -664,9 +667,10 @@ async function removeSlot(index) {
   if (state.slots.length <= 1) return;
   const slot = state.slots[index];
   await changeSlots(async () => { state.slots.splice(index, 1); }, slot.id);
+  const shiftDown = (f) => (f === index + 1 ? 1 : f > index + 1 ? f - 1 : f);
   for (const item of state.objects) {
-    if (item.filament === index + 1) item.filament = 1;
-    else if (item.filament > index + 1) item.filament--;
+    item.filament = shiftDown(item.filament);
+    for (const p of item.parts || []) p.filament = shiftDown(p.filament);
     viewer.updateObject(item);
   }
   invalidateAll();
@@ -1010,10 +1014,48 @@ function deletePlate() {
 // ----------------------------------------------------------------- models --
 
 const viewer = new Viewer(ui.viewport);
-viewer.colourOf = (item) => state.slots[(item.filament || 1) - 1]?.colour || '#4F9DDE';
+viewer.colourOf = (item, part = 0) => state.slots[((item.parts ? item.parts[part]?.filament : item.filament) || 1) - 1]?.colour || '#4F9DDE';
 
-function newItem({ name, positions, plateId, modifiers = [], x, y, quaternion, scale, placed = false, filament = 1 }) {
+/** Every filament a model uses (one per colour part). */
+function itemFilaments(item) {
+  return item.parts ? item.parts.map((p) => p.filament) : [item.filament];
+}
+
+// Multi-colour models: parts in one frame -> one engine object per colour.
+const partsWorker = new Worker(new URL('../workers/parts-worker.js', import.meta.url), { type: 'module' });
+let partsJob = 0;
+function combineColourParts(parts) {
+  const id = ++partsJob;
+  return new Promise((resolve, reject) => {
+    const onMessage = (event) => {
+      if (event.data.id !== id) return;
+      if ('progress' in event.data) { showMessage(`Preparing colours… ${event.data.progress}%`); return; }
+      partsWorker.removeEventListener('message', onMessage);
+      if (event.data.ok) resolve(event.data.result); else reject(new Error(event.data.error));
+    };
+    partsWorker.addEventListener('message', onMessage);
+    partsWorker.postMessage({ id, parts });
+  });
+}
+
+/** A 3MF object with parts in different filaments becomes one multi-colour model. */
+async function prepareProjectColours(project) {
+  const notes = [];
+  for (const obj of project.objects) {
+    if (!obj.colourParts) continue;
+    showMessage('Preparing colours…');
+    const result = await combineColourParts(obj.colourParts);
+    obj.positions = result.positions;
+    obj.parts = result.parts;
+    obj.filament = result.parts[0].filament;
+    for (const n of result.notes) if (!notes.includes(n)) notes.push(n);
+  }
+  return notes;
+}
+
+function newItem({ name, positions, plateId, modifiers = [], x, y, quaternion, scale, placed = false, filament = 1, parts = null }) {
   return {
+    parts: parts && parts.length > 1 ? parts.map((p) => ({ ...p, stl: null })) : null,
     id: 'obj-' + state.nextId++,
     name,
     positions,
@@ -1046,6 +1088,7 @@ async function addFiles(files) {
   const list = [...files];
   if (!list.length) return;
   showMessage('');
+  const meshes = []; // STL/OBJ/STEP models, in their file coordinates
   for (const file of list) {
     const kind = fileKind(file.name);
     if (!kind) {
@@ -1069,15 +1112,53 @@ async function addFiles(files) {
       }
       const positions = parseStl(bytes);
       if (positions.length === 0) throw new Error('The file contains no triangles.');
-      normalise(positions);
-      const item = addItem(newItem({ name: file.name.replace(/\.[^.]+$/, ''), positions }));
-      viewer.select(item.id);
+      meshes.push({ name: file.name.replace(/\.[^.]+$/, ''), positions });
       showMessage('');
     } catch (error) {
       showMessage(`${file.name}: ${errorText(error)}`, 'error');
     }
   }
+  if (meshes.length > 1 && partsOverlap(meshes) && confirm(
+    `These ${meshes.length} files overlap, so they look like the parts of one design (for example one file per colour).\n\n`
+    + 'OK: keep them together as one multi-colour model, each part with its own filament.\n'
+    + 'Cancel: add them as separate models.')) {
+    await addMultiColourModel(meshes);
+  } else {
+    for (const m of meshes) {
+      normalise(m.positions);
+      const item = addItem(newItem({ name: m.name, positions: m.positions }));
+      viewer.select(item.id);
+    }
+  }
   placeNewObjects();
+}
+
+/** Do the files' outlines overlap (seen from above)? */
+function partsOverlap(meshes) {
+  const boxes = meshes.map((m) => bounds(m.positions));
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i], b = boxes[j];
+      if (a.min[0] < b.max[0] && b.min[0] < a.max[0] && a.min[1] < b.max[1] && b.min[1] < a.max[1]) return true;
+    }
+  }
+  return false;
+}
+
+async function addMultiColourModel(meshes) {
+  const room = maxSlots();
+  if (room > 1) await ensureSlots(Math.min(meshes.length, room));
+  const parts = meshes.map((m, i) => ({ name: m.name, filament: Math.min(i + 1, state.slots.length), positions: m.positions }));
+  showMessage('Preparing colours…');
+  const result = await combineColourParts(parts);
+  normalise(result.positions);
+  const name = meshes[0].name + (meshes.length > 1 ? ` +${meshes.length - 1}` : '');
+  const item = addItem(newItem({ name, positions: result.positions, parts: result.parts, filament: result.parts[0].filament }));
+  viewer.select(item.id);
+  const notes = [...result.notes];
+  if (room < 2) notes.unshift('This printer uses one filament, so every part prints in it. Pick a printer with an AMS or several tool heads for colours.');
+  else notes.unshift(`Loaded as one model with ${result.parts.length} colour part(s). Pick each part's filament in the model's panel.`);
+  showMessage(notes.join('\n'));
 }
 
 /** Models from a 3MF, keeping their arrangement, onto the current plate (settings are not used). */
@@ -1094,7 +1175,9 @@ async function add3mfModels(bytes, fileName) {
     addItem(newItem({ name: fileName.replace(/\.[^.]+$/, ''), positions }));
     return;
   }
-  await ensureSlots(Math.max(1, ...project.objects.map((o) => o.filament || 1)));
+  await ensureSlots(Math.max(1, ...project.objects.flatMap((o) => (o.colourParts || [o]).map((c) => c.filament || 1))));
+  const colourNotes = await prepareProjectColours(project);
+  project.warnings.push(...colourNotes);
   const items = itemsFromProject(project, () => state.activePlate);
   for (const item of items) {
     addItem(item);
@@ -1121,6 +1204,7 @@ function itemsFromProject(project, plateFor) {
         positions: obj.positions,
         plateId: plateFor(inst.plateIndex),
         filament: (obj.filament || 1) <= state.slots.length ? obj.filament || 1 : 1,
+        parts: obj.parts ? obj.parts.map((p) => ({ ...p, filament: p.filament <= state.slots.length ? p.filament : 1 })) : null,
         x: pos.x,
         y: pos.y,
         quaternion: q,
@@ -1207,10 +1291,12 @@ function objectsChanged() {
     b.textContent = o.name;
     b.title = o.name;
     if (state.slots.length > 1) {
-      const dot = document.createElement('i');
-      dot.className = 'dot';
-      dot.style.background = state.slots[o.filament - 1]?.colour || '#999';
-      b.prepend(dot);
+      for (const f of [...new Set(itemFilaments(o))].reverse()) {
+        const dot = document.createElement('i');
+        dot.className = 'dot';
+        dot.style.background = state.slots[f - 1]?.colour || '#999';
+        b.prepend(dot);
+      }
     }
     if (o === sel) b.classList.add('selected');
     if (!viewer.isInside(o.id)) b.classList.add('outside');
@@ -1310,6 +1396,7 @@ function duplicateSelected() {
     placed: true,
     modifiers: item.modifiers.map((m) => ({ ...m, id: 'mod-' + state.nextId++, matrix: m.matrix.clone() })),
     filament: item.filament,
+    parts: item.parts,
   });
   copy.stl = item.stl;
   addItem(copy);
@@ -1412,7 +1499,37 @@ function renderObjectPanel() {
   ui.objPlate.parentElement.hidden = state.plates.length < 2;
   ui.objFilament.replaceChildren(...state.slots.map((_, i) => option(String(i + 1), slotLabel(i))));
   ui.objFilament.value = String(item.filament);
-  ui.objFilament.parentElement.parentElement.hidden = state.slots.length < 2;
+  ui.objFilament.parentElement.parentElement.hidden = state.slots.length < 2 || !!item.parts;
+  ui.partSection.hidden = !item.parts;
+  if (item.parts) {
+    ui.partList.replaceChildren(...item.parts.map((part, i) => {
+      const row = document.createElement('label');
+      row.className = 'part-row';
+      const sw = document.createElement('i');
+      sw.className = 'obj-swatch';
+      sw.style.background = state.slots[part.filament - 1]?.colour || '#999';
+      const name = document.createElement('span');
+      name.className = 'part-name';
+      name.textContent = i === 0 ? `${part.name} (main)` : part.name;
+      name.title = part.name;
+      const sel = document.createElement('select');
+      sel.className = 'part-filament';
+      sel.setAttribute('aria-label', `Filament for ${part.name}`);
+      sel.append(...state.slots.map((_, k) => option(String(k + 1), slotLabel(k))));
+      sel.value = String(part.filament);
+      sel.disabled = state.slots.length < 2;
+      sel.onchange = () => {
+        part.filament = +sel.value;
+        item.filament = item.parts[0].filament;
+        viewer.refreshColors();
+        invalidatePlate(item.plateId);
+        renderObjectPanel();
+        objectsChanged();
+      };
+      row.append(sw, name, sel);
+      return row;
+    }));
+  }
   ui.objSwatch.style.background = state.slots[item.filament - 1]?.colour || '#999';
   renderRotation(item);
   const mod = selectedModifier();
@@ -1437,7 +1554,7 @@ function renderObjectPanel() {
 // -------------------------------------------------------------- manifest --
 
 /** Project manifest + mesh blob in the engine's one-slicer-api format, for the given plates. */
-function buildProject(plateIds, shift = null) {
+function buildProject(plateIds, shift = null, { split = true } = {}) {
   const toEngine = shift ? new THREE.Matrix4().makeTranslation(-shift[0], -shift[1], 0) : null;
   const plates = state.plates.filter((p) => plateIds.includes(p.id));
   const items = state.objects.filter((o) => plateIds.includes(o.plateId));
@@ -1459,16 +1576,24 @@ function buildProject(plateIds, shift = null) {
   const instances = [];
   const modifierVolumes = [];
   for (const item of items) {
-    if (!item.stl) item.stl = toBinaryStl(item.positions);
-    const meshId = addMesh(item.positions, item.positions, item.stl);
     const geometry = viewer.objects.get(item.id).mesh.geometry;
-    objects.push({ id: item.id, meshId, label: item.name.slice(0, 200), extruderId: state.slots.length > 1 ? item.filament : 0 });
-    instances.push({
-      id: 'inst-' + item.id,
-      objectId: item.id,
-      plateId: item.plateId,
-      transform: { matrix: toRowMajor(toEngine ? toEngine.clone().multiply(instanceMatrix(item, geometry)) : instanceMatrix(item, geometry)) },
-    });
+    const matrix = toRowMajor(toEngine ? toEngine.clone().multiply(instanceMatrix(item, geometry)) : instanceMatrix(item, geometry));
+    if (split && item.parts) {
+      // A multi-colour model: one engine object per colour, all placed the same way.
+      item.parts.forEach((part, i) => {
+        const positions = item.positions.subarray(part.start, part.end);
+        if (!part.stl) part.stl = toBinaryStl(positions);
+        const id = i ? `${item.id}-p${i}` : item.id;
+        objects.push({ id, meshId: addMesh(positions, part, part.stl), label: `${item.name} (${i + 1})`.slice(0, 200),
+          extruderId: state.slots.length > 1 ? part.filament : 0 });
+        instances.push({ id: 'inst-' + id, objectId: id, plateId: item.plateId, transform: { matrix } });
+      });
+    } else {
+      if (!item.stl) item.stl = toBinaryStl(item.positions);
+      const meshId = addMesh(item.positions, item.positions, item.stl);
+      objects.push({ id: item.id, meshId, label: item.name.slice(0, 200), extruderId: state.slots.length > 1 ? item.filament : 0 });
+      instances.push({ id: 'inst-' + item.id, objectId: item.id, plateId: item.plateId, transform: { matrix } });
+    }
     for (const mod of item.modifiers) {
       if (!mod.stl) mod.stl = toBinaryStl(mod.positions);
       const modMesh = addMesh(mod.positions, mod.positions, mod.stl);
@@ -1504,7 +1629,7 @@ const arrange = withBusy(async (operation = 'arrange') => {
   showMessage(operation === 'arrange' ? 'Arranging…' : 'Finding the best orientation…');
   try {
     const shift = bedShift();
-    const { blob, manifest } = buildProject([state.activePlate], shift);
+    const { blob, manifest } = buildProject([state.activePlate], shift, { split: false });
     const { manifest: out } = await engine.arrange(settingLayers([state.activePlate], shift), blob, manifest, operation);
     for (const inst of out.instances || []) {
       const item = state.objects.find((o) => 'inst-' + o.id === inst.id || o.id === inst.objectId);
@@ -1680,7 +1805,7 @@ function outputName(plateId) {
   const plate = state.plates.length > 1 ? `plate${state.plates.findIndex((p) => p.id === plateId) + 1}` : '';
   const printer = (state.printer.model || state.printer.name).replace(/\s+/g, '');
   const layer = first(effective('layer_height'));
-  const used = [...new Set(items.map((o) => o.filament))];
+  const used = [...new Set(items.flatMap(itemFilaments))];
   const mat = used.length > 1 ? `${used.length}colour` : first(state.slots[(used[0] || 1) - 1]?.settings.filament_type) || '';
   return [base, plate, layer ? `${layer}mm` : '', mat, printer].filter(Boolean).map(safeName).join('_') + '.gcode';
 }
@@ -1870,7 +1995,7 @@ const openProject = withBusy(async (file) => {
   state.plates = [];
   state.nextPlate = 1;
   const plateIds = project.plates.map((p) => addPlate(p.name).id);
-  const needed = Math.max(1, ...project.objects.map((o) => o.filament || 1));
+  const needed = Math.max(1, ...project.objects.flatMap((o) => (o.colourParts || [o]).map((c) => c.filament || 1)));
   if (needed > state.slots.length) {
     const before = state.slots.length;
     await ensureSlots(needed);
@@ -1880,6 +2005,7 @@ const openProject = withBusy(async (file) => {
       notes.push(`Added filaments ${before + 1}–${state.slots.length} for the coloured models; set their materials and colours in the Filament list.`);
     }
   }
+  notes.push(...await prepareProjectColours(project));
   const items = itemsFromProject(project, (i) => plateIds[i] || plateIds[0]);
   for (const item of items) addItem(item);
   setActivePlate(plateIds.find((id) => objectsOn(id).length) || plateIds[0]);

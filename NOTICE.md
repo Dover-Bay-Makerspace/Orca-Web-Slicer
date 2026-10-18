@@ -26,6 +26,12 @@
 - https://github.com/gzuidhof/coi-serviceworker — MIT License
   (`vendor/coi-serviceworker.LICENSE`)
 
+## csg.js (algorithm in `workers/parts-worker.js`)
+
+- https://github.com/evanw/csg.js — Copyright (c) 2011 Evan Wallace, MIT License.
+  The BSP-tree solid boolean used to cut overlapping colour parts follows its
+  algorithm (rewritten here without recursion).
+
 ## This site
 
 The web interface (HTML/CSS/JS, tools and workflow) is released under the
