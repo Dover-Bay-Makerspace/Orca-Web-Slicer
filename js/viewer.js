@@ -198,13 +198,16 @@ export class Viewer extends EventTarget {
   #setDisplay(o) {
     const item = o.item;
     let positions = item.positions, states = null, source = null;
-    if (item.paint && item.paint.size) ({ positions, states, source } = expand(item.positions, item.paint));
+    // The support painting tool shows support paint; otherwise colour paint is shown.
+    const supports = this.tool === 'supports';
+    const map = supports ? item.supportPaint : item.paint;
+    if (map && map.size) ({ positions, states, source } = expand(item.positions, map));
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.computeVertexNormals();
     geo.computeBoundingBox();
-    if (states || item.parts) geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(positions.length), 3));
-    geo.userData = { states, source };
+    if (states || item.parts || supports) geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(positions.length), 3));
+    geo.userData = { states, source, supports };
     const old = o.mesh.geometry;
     o.mesh.geometry = geo;
     old.dispose();
@@ -222,6 +225,11 @@ export class Viewer extends EventTarget {
     this.updateObject(item);
   }
 
+  /** A painting tool (colour or supports) is active. */
+  get isPainting() {
+    return this.tool === 'paint' || this.tool === 'supports';
+  }
+
   /** Mesh triangle under a ray hit (painted triangles are drawn split). */
   sourceTriangle(hit) {
     const src = hit.object.geometry.userData?.source;
@@ -232,12 +240,15 @@ export class Viewer extends EventTarget {
     const geo = o.mesh.geometry;
     const attr = geo.attributes.color;
     const item = o.item;
-    const { states, source } = geo.userData;
+    const { states, source, supports } = geo.userData;
     const fil = (n) => new THREE.Color(this.filamentColour ? this.filamentColour(n) : '#4f9dde');
-    const palette = Array.from({ length: 17 }, (_, n) => (n ? fil(n) : null));
+    // Support paint: green = supports here, red = no supports here, on a grey model.
+    const palette = supports
+      ? [null, new THREE.Color(COLORS['support-enforcer']), new THREE.Color(COLORS['support-blocker'])]
+      : Array.from({ length: 17 }, (_, n) => (n ? fil(n) : null));
     const parts = item.parts || [{ start: 0, end: item.positions.length }];
-    const partColours = parts.map((_, i) => new THREE.Color(this.colourOf ? this.colourOf(item, i) : '#4f9dde'));
-    const key = palette.slice(1).map((c) => c.getHexString()).join() + partColours.map((c) => c.getHexString()).join() + o.paintVersion;
+    const partColours = parts.map((_, i) => new THREE.Color(supports ? '#b9bec5' : this.colourOf ? this.colourOf(item, i) : '#4f9dde'));
+    const key = (supports ? 'S' : '') + palette.slice(1).map((c) => c.getHexString()).join() + partColours.map((c) => c.getHexString()).join() + o.paintVersion;
     if (key === o.colourKey) return;
     o.colourKey = key;
     const arr = attr.array;
@@ -247,7 +258,7 @@ export class Viewer extends EventTarget {
       const src = source ? source[t] : t;
       while (part < parts.length - 1 && src * 9 >= parts[part].end) part++;
       while (part > 0 && src * 9 < parts[part].start) part--;
-      const c = states && states[t] ? palette[states[t]] : partColours[part];
+      const c = states && states[t] && palette[states[t]] ? palette[states[t]] : partColours[part];
       for (let k = 0; k < 3; k++) { arr[t * 9 + k * 3] = c.r; arr[t * 9 + k * 3 + 1] = c.g; arr[t * 9 + k * 3 + 2] = c.b; }
     }
     attr.needsUpdate = true;
@@ -371,7 +382,7 @@ export class Viewer extends EventTarget {
         else mat.color.setHex(id === this.selectedId ? COLORS.selected : COLORS.model);
       }
       // The selected model glows orange so it stands out whatever its filament colour.
-      const glow = this.tool === 'paint' || o.mesh.geometry.attributes.color ? 0x2e1700 : 0x7a3c00;
+      const glow = this.isPainting || o.mesh.geometry.attributes.color ? 0x2e1700 : 0x7a3c00;
       mat.emissive.setHex(id === this.selectedId ? glow : 0x000000);
       for (const [mid, m] of o.modifiers) {
         const on = mid === this.selectedModifierId;
@@ -393,9 +404,14 @@ export class Viewer extends EventTarget {
 
   /** Pick the model tool: 'move', 'rotate' or 'layflat'. */
   setTool(tool) {
+    const wasSupports = this.tool === 'supports';
     this.tool = tool;
-    this.renderer.domElement.style.cursor = tool === 'layflat' || tool === 'paint' ? 'crosshair' : '';
-    if (tool !== 'paint' && this.brushCursor) this.brushCursor.visible = false;
+    this.renderer.domElement.style.cursor = tool === 'layflat' || this.isPainting ? 'crosshair' : '';
+    if (!this.isPainting && this.brushCursor) this.brushCursor.visible = false;
+    if (wasSupports !== (tool === 'supports')) {
+      // Switch every model between colour paint and support paint display.
+      for (const o of this.objects.values()) { o.paintVersion++; this.#setDisplay(o); }
+    }
     this.#placeGizmo();
     this.refreshColors();
     this.dispatchEvent(new CustomEvent('tool', { detail: { tool } }));
@@ -484,7 +500,7 @@ export class Viewer extends EventTarget {
     const s = hit.object.matrixWorld.getMaxScaleOnAxis() || 1;
     this.dispatchEvent(new CustomEvent('paint', {
       detail: {
-        phase, id: hit.object.userData.id, point: [local.x, local.y, local.z], triangle: this.sourceTriangle(hit),
+        phase, id: hit.object.userData.id, point: [local.x, local.y, local.z], triangle: this.sourceTriangle(hit), tool: this.tool,
         radius: this.brushRadius / s, erase: event.shiftKey,
       },
     }));
@@ -548,7 +564,7 @@ export class Viewer extends EventTarget {
           return;
         }
       }
-      if (this.tool === 'paint') {
+      if (this.isPainting) {
         const hit = this.#modelHit();
         if (hit) {
           if (hit.object.userData.id !== this.selectedId) this.select(hit.object.userData.id);
@@ -587,7 +603,7 @@ export class Viewer extends EventTarget {
       }
     });
     el.addEventListener('pointermove', (event) => {
-      if (this.tool === 'paint' && this.mode === 'prepare' && !this.drag) {
+      if (this.isPainting && this.mode === 'prepare' && !this.drag) {
         if (this.paintDrag || event.buttons === 0) {
           this.#pick(event);
           const hit = this.#modelHit(this.paintDrag?.id);
@@ -839,7 +855,9 @@ export function instanceMatrix(item, geometry) {
 
 /** three.js Matrix4 -> the engine manifest's row-major 16-number array. */
 export function toRowMajor(matrix) {
-  return matrix.clone().transpose().toArray().map((v) => (Math.abs(v) < 1e-12 ? 0 : +v.toFixed(9)));
+  // Full precision: OrcaSlicer treats a matrix as skewed when its rotation is
+  // off by more than ~1e-12, so rounding here would break turned models.
+  return matrix.clone().transpose().toArray().map((v) => (Math.abs(v) < 1e-14 ? 0 : v));
 }
 
 export function fromRowMajor(values) {

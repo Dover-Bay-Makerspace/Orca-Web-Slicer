@@ -376,3 +376,51 @@ export function paintStates(paint) {
   }
   return used;
 }
+
+/**
+ * Painted support areas as closed volumes the engine understands (support
+ * enforcer / blocker parts): every leaf painted `state` becomes a thin prism
+ * `depth` mm either side of the surface. Returns a flat triangle array.
+ */
+export function paintVolumes(positions, paint, state, depth = 0.4) {
+  const out = [];
+  const push = (...vs) => { for (const v of vs) out.push(v[0], v[1], v[2]); };
+  for (const [i, str] of paint) {
+    let t;
+    try { t = decode(str); } catch { continue; }
+    forEachLeaf(triangle(positions, i), t, (tri, s) => {
+      if (s !== state) return;
+      const [a, b, c] = tri;
+      const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+      const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+      const l = Math.hypot(...n);
+      if (l < 1e-12) return;
+      const d = [n[0] / l * depth, n[1] / l * depth, n[2] / l * depth];
+      const up = (p) => [p[0] + d[0], p[1] + d[1], p[2] + d[2]];
+      const dn = (p) => [p[0] - d[0], p[1] - d[1], p[2] - d[2]];
+      const [A, B, C] = [up(a), up(b), up(c)];
+      const [A2, B2, C2] = [dn(a), dn(b), dn(c)];
+      push(A, B, C, A2, C2, B2);
+      for (const [p, q, P, Q] of [[A2, B2, A, B], [B2, C2, B, C], [C2, A2, C, A]]) push(p, q, Q, p, Q, P);
+    });
+  }
+  return new Float32Array(out);
+}
+
+/** Triangles facing downwards more steeply than `angle` degrees from vertical, not on the bottom. */
+export function overhangTriangles(positions, angle = 45) {
+  const count = positions.length / 9;
+  let minZ = Infinity;
+  for (let i = 2; i < positions.length; i += 3) minZ = Math.min(minZ, positions[i]);
+  const limit = -Math.sin((angle * Math.PI) / 180);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const [a, b, c] = triangle(positions, i);
+    if (Math.max(a[2], b[2], c[2]) < minZ + 0.05) continue; // resting on the bed
+    const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    const l = Math.hypot(...n);
+    if (l > 1e-12 && n[2] / l <= limit) out.push(i);
+  }
+  return out;
+}

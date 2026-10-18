@@ -511,3 +511,7 @@ button.tool-toggle[aria-pressed="true"] { background: var(--accent); border-colo
 button.tool-toggle.small { padding: 3px 10px; font-size: 12px; }
 #paintHint { margin: 0; }
 @media (max-width: 820px) { .paint-bar { left: 12px; right: 12px; transform: none; max-width: none; } }
+
+.paint-colours button.support-on { background: #2fbf5a; width: auto; padding: 0 8px; text-shadow: none; }
+.paint-colours button.support-off { background: #e0453a; width: auto; padding: 0 8px; text-shadow: none; }
+button.small-btn { width: auto; padding: 4px 10px; font-size: 12px; }

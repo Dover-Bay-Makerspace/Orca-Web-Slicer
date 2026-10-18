@@ -7,7 +7,7 @@ import {
 } from './profiles.js';
 import { SettingsEditor, keyTabs } from './settings-editor.js';
 import { readProjectFile } from './project-io.js';
-import { MeshPaint, mapStates, paintStates } from './paint.js';
+import { MeshPaint, mapStates, paintStates, paintVolumes, overhangTriangles } from './paint.js';
 import { makeZip } from './zip.js';
 import { flushVolume } from './flush.js';
 
@@ -33,7 +33,8 @@ const ui = Object.fromEntries([
   'rTime', 'rFilament', 'downloadBtn', 'downloadAllBtn', 'rNote', 'message', 'tabPrepare', 'tabPreview', 'prepareTools',
   'addBtn', 'modelFile', 'arrangeBtn', 'orientBtn', 'rotX', 'rotY', 'rotZ', 'rotateTool', 'layFlatTool', 'paintTool', 'paintBar', 'paintColours', 'paintErase',
   'paintBrushMode', 'paintFillMode', 'paintSize', 'paintSizeText', 'paintAngle', 'paintAngleText', 'paintSizeRow',
-  'paintAngleRow', 'paintUndo', 'paintRedo', 'paintClear', 'paintHint', 'undoBtn', 'redoBtn', 'rotXDeg', 'rotYDeg', 'rotZDeg', 'rotReset', 'scaleInput', 'dupBtn', 'delBtn', 'viewport',
+  'paintAngleRow', 'paintUndo', 'paintRedo', 'paintClear', 'paintHint', 'undoBtn', 'redoBtn', 'supportTool', 'supportAutoRow',
+  'supportAuto', 'supportAutoAngle', 'supportBoxSection', 'rotXDeg', 'rotYDeg', 'rotZDeg', 'rotReset', 'scaleInput', 'dupBtn', 'delBtn', 'viewport',
   'dropHint', 'layerControls', 'layerSlider', 'layerLabel', 'legend', 'objectBar', 'objectList', 'selectionInfo',
   'fitBtn', 'plateBar', 'plateList', 'addPlateBtn', 'delPlateBtn', 'objPanel', 'objName', 'objPlate', 'addEnforcer', 'addBlocker',
   'partSection', 'partList', 'modList', 'modEdit', 'modTitle', 'modX', 'modY', 'modZ', 'modW', 'modD', 'modH', 'modDelete',
@@ -246,6 +247,16 @@ function settingLayers(plateIds = state.plates.map((p) => p.id), shift = null) {
     tower = 'enable_prime_tower' in state.overrides ? first(state.overrides.enable_prime_tower) === '1' : true;
   }
   Object.assign(final, extruderAddressing(m, tower));
+  // Green support paint or an enforcer box means "supports here": with Supports
+  // off, switch them on for those places only (OrcaSlicer's "manual" support).
+  const onPlates = state.objects.filter((o) => plateIds.includes(o.plateId));
+  const enforced = onPlates.some((o) => o.modifiers.some((md) => md.role === 'support-enforcer')
+    || (o.supportPaint?.size && paintStates(o.supportPaint).has(1)));
+  if (enforced && String(first(effective('enable_support'))) !== '1') {
+    const base = (v, key) => (Array.isArray(baseValue(key)) ? [v] : v);
+    final.enable_support = base('1', 'enable_support');
+    final.support_type = base(String(first(effective('support_type')) || '').startsWith('normal') ? 'normal(manual)' : 'tree(manual)', 'support_type');
+  }
   // Values worked out here (from the presets and the user's changes) win over the raw changes.
   const shifted = shift ? shiftedBedSettings(shift, { ...changes, ...final }) : {};
   return [
@@ -1069,6 +1080,7 @@ async function prepareProjectColours(project) {
       obj.positions = raw.positions;
       obj.parts = raw.parts;
       obj.paint = raw.paint;
+      obj.supportPaint = raw.supportPaint;
       obj.filament = raw.parts[0].filament;
       continue;
     }
@@ -1077,8 +1089,9 @@ async function prepareProjectColours(project) {
     obj.positions = result.positions;
     obj.parts = result.parts;
     obj.filament = result.parts[0].filament;
-    if (obj.paint?.length) {
+    if (obj.paint?.length || obj.supportPaint?.length) {
       obj.paint = null;
+      obj.supportPaint = null;
       if (!notes.includes(PAINT_DROPPED)) notes.push(PAINT_DROPPED);
     }
     for (const n of result.notes) if (!notes.includes(n)) notes.push(n);
@@ -1086,7 +1099,7 @@ async function prepareProjectColours(project) {
   return notes;
 }
 
-const PAINT_DROPPED = 'Painted colours on models made of several coloured parts were left out; this slicing engine can\'t print both.';
+const PAINT_DROPPED = 'Painting on models made of several coloured parts was left out; this slicing engine can\'t print both.';
 
 /** Parts kept as they are (for the paint engine): one range per part, paint re-indexed. */
 function rawParts(parts) {
@@ -1094,19 +1107,22 @@ function rawParts(parts) {
   const positions = new Float32Array(total);
   const out = [];
   const paint = [];
+  const supportPaint = [];
   let start = 0;
   for (const p of parts) {
     positions.set(p.positions, start);
     for (const [i, str] of p.paint || []) paint.push([i + start / 9, str]);
+    for (const [i, str] of p.supportPaint || []) supportPaint.push([i + start / 9, str]);
     out.push({ name: p.name, filament: p.filament, start, end: start + p.positions.length });
     start += p.positions.length;
   }
-  return { positions, parts: out, paint: paint.length ? paint : null };
+  return { positions, parts: out, paint: paint.length ? paint : null, supportPaint: supportPaint.length ? supportPaint : null };
 }
 
-function newItem({ name, positions, plateId, modifiers = [], x, y, quaternion, scale, placed = false, filament = 1, parts = null, paint = null }) {
+function newItem({ name, positions, plateId, modifiers = [], x, y, quaternion, scale, placed = false, filament = 1, parts = null, paint = null, supportPaint = null }) {
   return {
     paint: paint && paint.size ? new Map(paint) : null,
+    supportPaint: supportPaint && supportPaint.size ? new Map(supportPaint) : null,
     parts: parts && parts.length > 1 ? parts.map((p) => ({ ...p, stl: null })) : null,
     id: 'obj-' + state.nextId++,
     name,
@@ -1259,6 +1275,7 @@ function itemsFromProject(project, plateFor) {
         filament: (obj.filament || 1) <= state.slots.length ? obj.filament || 1 : 1,
         parts: obj.parts ? obj.parts.map((p) => ({ ...p, filament: p.filament <= state.slots.length ? p.filament : 1 })) : null,
         paint: obj.paint?.length ? new Map(obj.paint) : null,
+        supportPaint: obj.supportPaint?.length ? new Map(obj.supportPaint) : null,
         x: pos.x,
         y: pos.y,
         quaternion: q,
@@ -1421,35 +1438,51 @@ function setTool(tool) {
 
 // ------------------------------------------------------------- painting --
 
-const paintTool = { filament: 2, mode: 'brush', erase: false, size: 2, angle: 30, stroke: null, pending: null };
+const paintTool = { filament: 2, support: 1, mode: 'brush', erase: false, size: 2, angle: 30, stroke: null, pending: null };
 
-function painterFor(item) {
-  if (!item.paint) item.paint = new Map();
-  if (!item.painter || item.painter.paint !== item.paint || item.painter.positions !== item.positions) {
-    item.painter = new MeshPaint(item.positions, item.paint);
+function painterFor(item, supports = false) {
+  const mapKey = supports ? 'supportPaint' : 'paint';
+  const key = supports ? 'supportPainter' : 'painter';
+  if (!item[mapKey]) item[mapKey] = new Map();
+  if (!item[key] || item[key].paint !== item[mapKey] || item[key].positions !== item.positions) {
+    item[key] = new MeshPaint(item.positions, item[mapKey]);
   }
-  return item.painter;
+  return item[key];
 }
 
 const paintEngineReady = () => state.capabilities?.features?.['x.orcaweb.paint'] === 'supported';
 const partsEngineReady = () => state.capabilities?.features?.['x.orcaweb.parts'] === 'supported';
 
 function renderPaintBar() {
-  const on = viewer.tool === 'paint' && viewer.mode === 'prepare';
+  const on = viewer.isPainting && viewer.mode === 'prepare';
   ui.paintBar.hidden = !on;
   if (!on) return;
+  const supports = viewer.tool === 'supports';
   if (paintTool.filament > state.slots.length) paintTool.filament = state.slots.length;
-  ui.paintColours.replaceChildren(...state.slots.map((slot, i) => {
+  const choice = (label, title, checked, onClick, cls = '', colour = '') => {
     const b = document.createElement('button');
     b.type = 'button';
     b.setAttribute('role', 'radio');
-    b.setAttribute('aria-checked', String(!paintTool.erase && paintTool.filament === i + 1));
-    b.title = `Paint with ${slotLabel(i)} (key ${i + 1})`;
-    b.textContent = String(i + 1);
-    b.style.background = slot.colour;
-    b.onclick = () => { paintTool.filament = i + 1; paintTool.erase = false; renderPaintBar(); };
+    b.setAttribute('aria-checked', String(checked));
+    b.title = title;
+    b.textContent = label;
+    if (cls) b.className = cls;
+    if (colour) b.style.background = colour;
+    b.onclick = onClick;
     return b;
-  }));
+  };
+  if (supports) {
+    ui.paintColours.replaceChildren(
+      choice('Supports here', 'Paint where supports must be added (key 1)', !paintTool.erase && paintTool.support === 1,
+        () => { paintTool.support = 1; paintTool.erase = false; renderPaintBar(); }, 'support-on'),
+      choice('No supports', 'Paint where supports must not be added (key 2)', !paintTool.erase && paintTool.support === 2,
+        () => { paintTool.support = 2; paintTool.erase = false; renderPaintBar(); }, 'support-off'),
+    );
+  } else {
+    ui.paintColours.replaceChildren(...state.slots.map((slot, i) => choice(String(i + 1), `Paint with ${slotLabel(i)} (key ${i + 1})`,
+      !paintTool.erase && paintTool.filament === i + 1, () => { paintTool.filament = i + 1; paintTool.erase = false; renderPaintBar(); }, '', slot.colour)));
+  }
+  ui.supportAutoRow.hidden = !supports;
   ui.paintErase.setAttribute('aria-pressed', String(paintTool.erase));
   ui.paintBrushMode.setAttribute('aria-pressed', String(paintTool.mode === 'brush'));
   ui.paintFillMode.setAttribute('aria-pressed', String(paintTool.mode === 'fill'));
@@ -1460,7 +1493,9 @@ function renderPaintBar() {
   ui.paintUndo.disabled = !history.undo.length;
   ui.paintRedo.disabled = !history.redo.length;
   const hints = [];
-  if (state.slots.length < 2) {
+  if (supports) {
+    hints.push('Green: supports are added there (supports switch on by themselves). Red: no supports there. Shift erases.');
+  } else if (state.slots.length < 2) {
     hints.push(maxSlots() < 2
       ? 'This printer uses one filament, so painted colours won\'t print. Pick a printer with an AMS, MMU or several tool heads.'
       : 'Add a second filament in the Filament list, then paint with it.');
@@ -1468,20 +1503,21 @@ function renderPaintBar() {
     hints.push(paintTool.mode === 'brush' ? 'Drag on a model to paint. Shift+drag erases. Keys 1–9 pick a filament.'
       : 'Click a face to fill it. Shift+click erases.');
   }
-  if (!paintEngineReady()) hints.push('This slicing engine doesn\'t print paint yet, so painted models print in their own colour (see the README to switch to the paint engine).');
+  if (!supports && !paintEngineReady()) hints.push('This slicing engine doesn\'t print paint yet, so painted models print in their own colour (see the README to switch to the paint engine).');
   ui.paintHint.textContent = hints.join(' ');
 }
 
 function applyPaint(detail) {
   const item = state.objects.find((o) => o.id === detail.id);
   if (!item) return;
-  if (detail.phase === 'start') paintTool.stroke = { item, changed: new Map() };
+  if (detail.phase === 'start') paintTool.stroke = { item, changed: new Map(), supports: detail.tool === 'supports' };
   const stroke = paintTool.stroke;
   if (!stroke || stroke.item !== item) return;
+  const supports = detail.tool === 'supports' || stroke.supports;
   if (detail.phase === 'end') {
     paintTool.stroke = null;
     if (stroke.changed.size) {
-      item.paintRev = (item.paintRev || 0) + 1;
+      if (supports) { item.supportRev = (item.supportRev || 0) + 1; item.supportVolumes = null; } else item.paintRev = (item.paintRev || 0) + 1;
       item.paintStates = null;
       invalidatePlate(item.plateId);
       objectsChanged();
@@ -1489,8 +1525,8 @@ function applyPaint(detail) {
     }
     return;
   }
-  const value = paintTool.erase || detail.erase ? 0 : paintTool.filament;
-  const painter = painterFor(item);
+  const value = paintTool.erase || detail.erase ? 0 : supports ? paintTool.support : paintTool.filament;
+  const painter = painterFor(item, supports);
   if (paintTool.mode === 'fill') {
     if (detail.phase === 'start') painter.fill(detail.triangle, value, paintTool.angle, stroke.changed);
   } else {
@@ -1504,9 +1540,11 @@ function applyPaint(detail) {
 
 function clearPaint() {
   const item = selected();
-  if (!item?.paint?.size) return;
-  painterFor(item).restore(new Map([...item.paint.keys()].map((k) => [k, undefined])));
-  item.paintRev = (item.paintRev || 0) + 1;
+  const supports = viewer.tool === 'supports';
+  const map = supports ? item?.supportPaint : item?.paint;
+  if (!map?.size) return;
+  painterFor(item, supports).restore(new Map([...map.keys()].map((k) => [k, undefined])));
+  if (supports) { item.supportRev = (item.supportRev || 0) + 1; item.supportVolumes = null; } else item.paintRev = (item.paintRev || 0) + 1;
   item.paintStates = null;
   viewer.repaint(item);
   invalidatePlate(item.plateId);
@@ -1549,6 +1587,7 @@ function duplicateSelected() {
     filament: item.filament,
     parts: item.parts,
     paint: item.paint,
+    supportPaint: item.supportPaint,
   });
   copy.stl = item.stl;
   addItem(copy);
@@ -1599,7 +1638,7 @@ function addModifier(role) {
   viewer.select(item.id, mod.id);
   invalidatePlate(item.plateId);
   if (role === 'support-enforcer' && first(effective('enable_support')) !== '1') {
-    showMessage('Support enforcer added. Supports are generated inside it when "Supports" is on (Normal or Tree); turn them on in Print settings.');
+    showMessage('Support enforcer added. Supports are generated inside it (only there while Supports is Off).');
   }
 }
 
@@ -1684,6 +1723,7 @@ function renderObjectPanel() {
     }));
   }
   ui.objSwatch.style.background = state.slots[item.filament - 1]?.colour || '#999';
+  ui.supportBoxSection.hidden = viewer.tool !== 'supports' && !item.modifiers.length;
   renderRotation(item);
   const mod = selectedModifier();
   ui.modList.replaceChildren(...item.modifiers.map((m, i) => {
@@ -1707,7 +1747,7 @@ function renderObjectPanel() {
 // -------------------------------------------------------------- manifest --
 
 /** Project manifest + mesh blob in the engine's one-slicer-api format, for the given plates. */
-function buildProject(plateIds, shift = null, { split = true } = {}) {
+function buildProject(plateIds, shift = null, { split = true, onBed = false } = {}) {
   const toEngine = shift ? new THREE.Matrix4().makeTranslation(-shift[0], -shift[1], 0) : null;
   const plates = state.plates.filter((p) => plateIds.includes(p.id));
   const items = state.objects.filter((o) => plateIds.includes(o.plateId));
@@ -1753,6 +1793,8 @@ function buildProject(plateIds, shift = null, { split = true } = {}) {
   for (const item of items) {
     const geometry = viewer.objects.get(item.id).mesh.geometry;
     const matrix = toRowMajor(toEngine ? toEngine.clone().multiply(instanceMatrix(item, geometry)) : instanceMatrix(item, geometry));
+    // Arrange / auto-orient want placements on the bed plane; the height is worked out here afterwards.
+    if (onBed) matrix[11] = 0;
     // Painted meshes get their own mesh entry (copies may be painted differently).
     const painted = sendPaint && item.paint?.size;
     if (split && item.parts) {
@@ -1785,6 +1827,26 @@ function buildProject(plateIds, shift = null, { split = true } = {}) {
       attachPaint(item, meshId, 0, item.positions.length / 9);
       objects.push({ id: item.id, meshId, label: item.name.slice(0, 200), extruderId: multi ? item.filament : 0 });
       instances.push({ id: 'inst-' + item.id, objectId: item.id, plateId: item.plateId, transform: { matrix } });
+    }
+    if (split && item.supportPaint?.size) {
+      // Painted supports go to the engine as thin enforcer / blocker parts along the painted surface.
+      if (!item.supportVolumes) {
+        const depth = Math.max(0.3, 2 * (+first(effective('layer_height')) || 0.2));
+        item.supportVolumes = [1, 2].map((st) => {
+          const pos = paintVolumes(item.positions, item.supportPaint, st, depth);
+          return pos.length ? { role: st === 1 ? 'support-enforcer' : 'support-blocker', stl: toBinaryStl(pos), positions: pos } : null;
+        }).filter(Boolean);
+      }
+      for (const v of item.supportVolumes) {
+        modifierVolumes.push({
+          id: `${item.id}-paint-${v.role}`,
+          meshId: addMesh(v.positions, v, v.stl),
+          role: v.role,
+          objectId: item.id,
+          plateId: item.plateId,
+          transform: { matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] },
+        });
+      }
     }
     for (const mod of item.modifiers) {
       if (!mod.stl) mod.stl = toBinaryStl(mod.positions);
@@ -1821,7 +1883,7 @@ const arrange = withBusy(async (operation = 'arrange') => {
   showMessage(operation === 'arrange' ? 'Arranging…' : 'Finding the best orientation…');
   try {
     const shift = bedShift();
-    const { blob, manifest } = buildProject([state.activePlate], shift, { split: false });
+    const { blob, manifest } = buildProject([state.activePlate], shift, { split: false, onBed: true });
     const { manifest: out } = await engine.arrange(settingLayers([state.activePlate], shift), blob, manifest, operation);
     for (const inst of out.instances || []) {
       const item = state.objects.find((o) => 'inst-' + o.id === inst.id || o.id === inst.objectId);
@@ -2130,7 +2192,7 @@ function updateButtons() {
   ui.tabPreview.disabled = !r || r.stale;
   for (const b of [ui.rotX, ui.rotY, ui.rotZ, ui.rotXDeg, ui.rotYDeg, ui.rotZDeg, ui.rotReset, ui.dupBtn, ui.delBtn, ui.scaleInput]) b.disabled = !sel || busy;
   const hasModels = state.objects.some((o) => o.plateId === state.activePlate);
-  for (const b of [ui.rotateTool, ui.layFlatTool, ui.paintTool]) b.disabled = !hasModels || busy;
+  for (const b of [ui.rotateTool, ui.layFlatTool, ui.paintTool, ui.supportTool]) b.disabled = !hasModels || busy;
 }
 
 // --------------------------------------------------------------- projects --
@@ -2166,7 +2228,10 @@ function snapItem(it) {
     scale: [...it.scale],
     parts: it.parts ? it.parts.map((p) => ({ ...p })) : null,
     paint: it.paint ? new Map(it.paint) : null,
+    supportPaint: it.supportPaint ? new Map(it.supportPaint) : null,
     painter: null,
+    supportPainter: null,
+    supportVolumes: null,
     paintStates: null,
     modifiers: it.modifiers.map((m) => ({ ...m, matrix: m.matrix.clone() })),
   };
@@ -2185,7 +2250,7 @@ function signature() {
   const f = (v) => (Math.round(v * 1e4) / 1e4).toString();
   return state.plates.map((p) => p.id + ':' + p.name).join(',') + '#' + state.objects.map((o) => [
     o.id, o.plateId, f(o.x), f(o.y), o.quaternion.toArray().map(f).join(' '), o.scale.map(f).join(' '), o.filament,
-    o.parts ? o.parts.map((p) => p.filament).join('+') : '', o.paintRev || 0,
+    o.parts ? o.parts.map((p) => p.filament).join('+') : '', o.paintRev || 0, o.supportRev || 0,
     o.modifiers.map((m) => m.id + m.role + m.matrix.elements.map(f).join(' ')).join(';'),
   ].join('|')).join('/');
 }
@@ -2422,6 +2487,20 @@ ui.modelFile.onchange = withBusy(async () => { await addFiles(ui.modelFile.files
 ui.arrangeBtn.onclick = () => arrange('arrange');
 ui.orientBtn.onclick = () => arrange('auto-orient');
 ui.paintTool.onclick = () => setTool('paint');
+ui.supportTool.onclick = () => setTool('supports');
+ui.supportAuto.onclick = () => {
+  const item = selected() || objectsOn(state.activePlate)[0];
+  if (!item) return;
+  const list = overhangTriangles(item.positions, +ui.supportAutoAngle.value);
+  painterFor(item, true).setTriangles(list, 1);
+  item.supportRev = (item.supportRev || 0) + 1;
+  item.supportVolumes = null;
+  viewer.select(item.id);
+  viewer.repaint(item);
+  invalidatePlate(item.plateId);
+  objectsChanged();
+  showMessage(list.length ? `Painted ${list.length} overhanging triangle(s) green. Paint red where you don't want supports.` : 'No overhangs that steep on this model.');
+};
 ui.paintErase.onclick = () => { paintTool.erase = !paintTool.erase; renderPaintBar(); };
 ui.paintBrushMode.onclick = () => { paintTool.mode = 'brush'; renderPaintBar(); };
 ui.paintFillMode.onclick = () => { paintTool.mode = 'fill'; renderPaintBar(); };
@@ -2506,6 +2585,8 @@ viewer.addEventListener('tool', (e) => {
   ui.rotateTool.setAttribute('aria-pressed', String(e.detail.tool === 'rotate'));
   ui.layFlatTool.setAttribute('aria-pressed', String(e.detail.tool === 'layflat'));
   ui.paintTool.setAttribute('aria-pressed', String(e.detail.tool === 'paint'));
+  ui.supportTool.setAttribute('aria-pressed', String(e.detail.tool === 'supports'));
+  renderObjectPanel();
   renderPaintBar();
 });
 viewer.addEventListener('paint', (e) => applyPaint(e.detail));
@@ -2521,14 +2602,23 @@ viewer.addEventListener('move', (e) => {
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && editor?.isOpen) { editor.close(); return; }
+  // Undo / redo work anywhere except while typing in a text box (which has its own).
+  const typing = e.target.closest('textarea, input:not([type="range"]):not([type="color"]):not([type="checkbox"]):not([type="file"])');
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !typing) {
+    const k = e.key.toLowerCase();
+    if (k === 'y' || (k === 'z' && e.shiftKey)) { redo(); e.preventDefault(); return; }
+    if (k === 'z') { undo(); e.preventDefault(); return; }
+  }
   if (e.target.closest('input, select, textarea') || viewer.mode !== 'prepare') return;
   if (e.key === 'Delete' || e.key === 'Backspace') { deleteSelected(); e.preventDefault(); }
-  if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { redo(); e.preventDefault(); return; }
-  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'z') { undo(); e.preventDefault(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (viewer.tool === 'paint' && /^[1-9]$/.test(e.key) && +e.key <= state.slots.length) {
     paintTool.filament = +e.key; paintTool.erase = false; renderPaintBar(); return;
   }
+  if (viewer.tool === 'supports' && (e.key === '1' || e.key === '2')) {
+    paintTool.support = +e.key; paintTool.erase = false; renderPaintBar(); return;
+  }
+  if (e.key === 'l' || e.key === 'L') setTool('supports');
   if (e.key === 'r' || e.key === 'R') setTool('rotate');
   if (e.key === 'f' || e.key === 'F') setTool('layflat');
   if (e.key === 'n' || e.key === 'N') setTool('paint');

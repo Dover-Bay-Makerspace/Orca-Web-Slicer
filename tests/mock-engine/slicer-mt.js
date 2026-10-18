@@ -80,6 +80,15 @@ var OneSlicerEngine = (function () {
     var x = 20;
     mf.instances.forEach(function (inst) {
       var m = inst.transform.matrix.slice();
+      // Like the real bridge (OrcaSlicer Transformation::has_skew, Eigen precision 1e-12).
+      var col = function (c) { return [m[c], m[4 + c], m[8 + c]]; };
+      var dot = function (a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+      var cs = [col(0), col(1), col(2)];
+      for (var i = 0; i < 3; i++) for (var j = i + 1; j < 3; j++) {
+        if (Math.abs(dot(cs[i], cs[j])) > 1e-12 * Math.sqrt(dot(cs[i], cs[i]) * dot(cs[j], cs[j])))
+          throw err('VALIDATION', 'OrcaSlicer arrange does not support a skewed project transform');
+      }
+      if (Math.abs(m[11]) > 1e-6) throw err('VALIDATION', 'OrcaSlicer arrange requires project transforms to be on the bed plane');
       if (request.operation === 'arrange') { m[3] = x; m[7] = 60; x += 45; if (x > bedW - 20) x = 20; }
       inst.transform.matrix = m;
     });

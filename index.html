@@ -133,6 +133,7 @@
           <button id="rotateTool" type="button" class="tool-toggle" aria-pressed="false" title="Rotate: drag the coloured rings around the selected model, or type angles in its panel (R)">⟳ Rotate</button>
           <button id="layFlatTool" type="button" class="tool-toggle" aria-pressed="false" title="Lay flat: click a flat face of a model to put that face down on the bed (F)">⊥ Lay flat</button>
           <button id="paintTool" type="button" class="tool-toggle" aria-pressed="false" title="Colour painting: paint filaments onto a model, like OrcaSlicer's Color Painting tool (N)">🖌 Paint</button>
+          <button id="supportTool" type="button" class="tool-toggle" aria-pressed="false" title="Support painting: paint where supports must or must not go, like OrcaSlicer's Support Painting tool (L)">▥ Supports</button>
           <label class="scale" title="Scale selected model"><input id="scaleInput" type="number" min="1" max="2000" step="5" value="100" aria-label="Scale (%)"><span>%</span></label>
           <button id="dupBtn" type="button" title="Duplicate selected">Copy</button>
           <button id="delBtn" type="button" title="Delete selected">Delete</button>
@@ -156,6 +157,12 @@
             <span class="paint-label">Paint with</span>
             <div id="paintColours" class="paint-colours" role="radiogroup" aria-label="Filament to paint with"></div>
             <button id="paintErase" type="button" class="tool-toggle small" aria-pressed="false" title="Erase paint (or hold Shift while painting)">Erase</button>
+          </div>
+          <div class="paint-row" id="supportAutoRow" hidden>
+            <button id="supportAuto" type="button" class="secondary small-btn" title="Paint every surface that hangs over at least this angle green">Auto-paint overhangs</button>
+            <label class="paint-size">steeper than <select id="supportAutoAngle" aria-label="Overhang angle">
+              <option value="30">30°</option><option value="45" selected>45°</option><option value="60">60°</option>
+            </select></label>
           </div>
           <div class="paint-row">
             <div class="seg" role="group" aria-label="Paint tool">
@@ -187,10 +194,10 @@
             </div>
             <p id="rotHint" class="hint">Tip: <b>Rotate</b> shows rings to drag (5° steps, hold Shift for 1°). <b>Lay flat</b> puts the face you click on the bed.</p>
           </div>
-          <div class="obj-section">
-            <span class="obj-label">Support boxes</span>
+          <div class="obj-section" id="supportBoxSection" hidden>
+            <span class="obj-label">Support boxes (optional)</span>
             <div class="mod-add">
-              <button id="addEnforcer" type="button" class="mod-btn support-enforcer" title="Supports are always generated inside this box (when supports are on)">+ Enforcer</button>
+              <button id="addEnforcer" type="button" class="mod-btn support-enforcer" title="Supports are generated inside this box">+ Enforcer</button>
               <button id="addBlocker" type="button" class="mod-btn support-blocker" title="No supports are generated inside this box">+ Blocker</button>
             </div>
             <div id="modList" class="mod-list"></div>

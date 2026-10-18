@@ -150,8 +150,14 @@ Hover over the pill to see the full error message.
   a small change (see `engine-patch/README.md` for the one-time setup).
   With the paint engine, multi-colour models are also printed as proper
   parts (no columns down to the bed).
-- **Limits:** painted supports or seams and per-model setting modifiers
-  aren't available. Adding a .3mf
+- **Support painting (Supports button or L):** paint green where supports
+  must go and red where they must not, by brush or fill, or use
+  **Auto-paint overhangs**. Green areas switch supports on by themselves
+  (only there, if Supports is Off). The optional support boxes are in the
+  same tool. Painted supports work with either engine (they are sent as thin
+  enforcer/blocker volumes along the painted surface) and open from
+  OrcaSlicer/Bambu 3MF files.
+- **Limits:** painted seams and per-model setting modifiers aren't available. Adding a .3mf
   with **Add model** brings in just its models. Use **Open project…** to also
   load its plates and settings.
 - **Undo / redo (↶ ↷ or Ctrl+Z / Ctrl+Y):** covers everything on the plates:

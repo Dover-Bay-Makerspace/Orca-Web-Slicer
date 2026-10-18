@@ -173,6 +173,7 @@ function parseModel(text, path, warnings) {
       }
       const tris = [];
       const paint = [];
+      const supportPaint = [];
       const tre = /<triangle\b([^>]*)\/?>/g;
       let t;
       while ((t = tre.exec(body))) {
@@ -180,9 +181,13 @@ function parseModel(text, path, warnings) {
         // Colour painting (OrcaSlicer / Bambu Studio: paint_color, PrusaSlicer: slic3rpe:mmu_segmentation).
         const pc = ta.paint_color || ta['slic3rpe:mmu_segmentation'];
         if (pc) paint.push([tris.length / 3, pc.toUpperCase()]);
+        // Support painting (OrcaSlicer / Bambu: paint_supports, PrusaSlicer: slic3rpe:custom_supports).
+        const sp = ta.paint_supports || ta['slic3rpe:custom_supports'];
+        if (sp) supportPaint.push([tris.length / 3, sp.toUpperCase()]);
         tris.push(+ta.v1, +ta.v2, +ta.v3);
       }
       obj.paint = paint.length ? paint : null;
+      obj.supportPaint = supportPaint.length ? supportPaint : null;
       const pos = new Float32Array(tris.length * 3);
       let bad = 0;
       for (let i = 0; i < tris.length; i++) {
@@ -320,7 +325,7 @@ async function readProject(buffer, fallbackBed) {
     if (!obj) { warnings.push(`Object ${id} is missing from ${path}`); return; }
     if (obj.mesh && obj.mesh.length) {
       const pos = transformPositions(obj.mesh, matrix);
-      if (partType === 'normal_part' || !partType) out.normal.push({ positions: pos, extruder, paint: obj.paint });
+      if (partType === 'normal_part' || !partType) out.normal.push({ positions: pos, extruder, paint: obj.paint, supportPaint: obj.supportPaint });
       else if (partType === 'support_enforcer' || partType === 'support_blocker') {
         out.modifiers.push({ role: partType === 'support_enforcer' ? 'support-enforcer' : 'support-blocker', positions: pos });
       } else if (partType === 'modifier_part') skipped.modifier_part++;
@@ -363,13 +368,14 @@ async function readProject(buffer, fallbackBed) {
       // them into one object per colour (see parts-worker.js).
       // Paint is per triangle, so it follows the triangles when parts are joined.
       const joined = (parts) => {
-        const paint = [];
+        const paint = [], supportPaint = [];
         let tri = 0;
         for (const p of parts) {
           for (const [i, str] of p.paint || []) paint.push([i + tri, str]);
+          for (const [i, str] of p.supportPaint || []) supportPaint.push([i + tri, str]);
           tri += p.positions.length / 9;
         }
-        return { positions: concat(parts.map((p) => p.positions)), paint: paint.length ? paint : null };
+        return { positions: concat(parts.map((p) => p.positions)), paint: paint.length ? paint : null, supportPaint: supportPaint.length ? supportPaint : null };
       };
       const byFilament = new Map();
       for (const part of out.normal) {
@@ -384,6 +390,7 @@ async function readProject(buffer, fallbackBed) {
         filament: objExtruder,
         positions: whole.positions,
         paint: whole.paint,
+        supportPaint: whole.supportPaint,
         colourParts: byFilament.size > 1
           ? [...byFilament.entries()].map(([ext, parts]) => ({ name: `${name} · filament ${ext}`, filament: ext, ...joined(parts) }))
           : null,

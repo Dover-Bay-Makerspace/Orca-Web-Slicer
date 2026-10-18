@@ -69,6 +69,13 @@ with zipfile.ZipFile(sys.argv[1], 'w') as z:
     z.writestr('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>')
     z.writestr('3D/3dmodel.model', model)
 `, path.join(models, 'painted-cube.3mf')]);
+{
+  // A "T": a 10 mm post with a 30 mm slab on top, so the slab's underside overhangs.
+  const a = boxStl(10, 10, 20, 0, 0, 0), b = boxStl(30, 10, 2, -10, 0, 20);
+  const both = Buffer.concat([a.subarray(0, 84), a.subarray(84), b.subarray(84)]);
+  both.writeUInt32LE(24, 80);
+  fs.writeFileSync(path.join(models, 'tee.stl'), both);
+}
 fs.writeFileSync(path.join(models, 'bracket.obj'), 'v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n');
 fs.writeFileSync(path.join(OUT, 'my-mk3s.json'), JSON.stringify({
   type: 'machine', name: 'My MK3S (classroom)', inherits: 'Prusa MK3S 0.4 nozzle', from: 'User', printable_height: '200',
@@ -153,6 +160,10 @@ try {
   // ---- support boxes on the first model
   await page.click('#objectList li:nth-child(1) button');
   check('selected-model panel appears', await page.isVisible('#objPanel'));
+  check('support boxes are not in the model panel by default', !(await page.isVisible('#addEnforcer')));
+  await page.keyboard.press('l');
+  check('L opens support painting, with the support boxes', (await page.getAttribute('#supportTool', 'aria-pressed')) === 'true'
+    && await page.isVisible('#addEnforcer') && (await page.$$('#paintColours button')).length === 2);
   await page.click('#addEnforcer');
   check('enforcer added and selected', (await page.$$('#modList .mod-chip')).length === 1 && await page.isVisible('#modEdit'));
   await page.fill('#modH', '4');
@@ -164,6 +175,7 @@ try {
   await page.click('#addBlocker');
   check('blocker added', (await page.$$('#modList .mod-chip')).length === 2);
   await page.screenshot({ path: path.join(OUT, '02-support-boxes.png') });
+  await page.keyboard.press('Escape');
 
   // ---- quick settings + Advanced editor
   await page.fill('#qLayer', '0.28');
@@ -609,6 +621,18 @@ try {
     await up.click('#undoBtn');
     const back = await up.evaluate(() => window.orcaWeb.state.objects.map((o) => [o.x.toFixed(1), o.y.toFixed(1)].join(',')).join());
     check('arrange can be undone', moved !== back || true, `${moved} -> ${back}`);
+    // Turned by an odd angle, then arrange / auto-orient (the real engine rejects rounded matrices).
+    await up.click('#objectList li button');
+    await up.fill('#rotZDeg', '37');
+    await up.dispatchEvent('#rotZDeg', 'change');
+    await up.fill('#rotXDeg', '23');
+    await up.dispatchEvent('#rotXDeg', 'change');
+    await up.click('#orientBtn');
+    await up.waitForTimeout(500);
+    const om = await msg(up);
+    await up.click('#arrangeBtn');
+    await up.waitForTimeout(500);
+    check('auto-orient and arrange work on a model turned by any angle', !/failed/i.test(om) && !/failed/i.test(await msg(up)), om + ' | ' + await msg(up));
     await up.click('#addPlateBtn');
     check('adding a plate is an undo step', (await up.$$('.plate-chip')).length === 2);
     await up.click('#undoBtn');
@@ -696,6 +720,39 @@ try {
     const plain = await sliceText(pg);
     check('plain engine: paint not sent, and the page says so', plain.includes('; painted_triangles = 0')
       && /doesn't print painted colours/.test(await msg(pg)), await msg(pg));
+
+    // Support painting: auto-paint overhangs, paint a "no supports" patch, slice.
+    await pg.click('#newBtn');
+    await pg.setInputFiles('#modelFile', [path.join(models, 'tee.stl')]);
+    await pg.waitForFunction(() => document.querySelectorAll('#objectList li').length === 1);
+    await pg.click('#objectList li button');
+    await pg.selectOption('#qSupport', 'off');
+    await pg.dispatchEvent('#qSupport', 'change');
+    await pg.keyboard.press('l');
+    await pg.click('#supportAuto');
+    const sp = await pg.evaluate(() => { const o = window.orcaWeb.state.objects[0]; return o.supportPaint ? [...o.supportPaint.values()] : []; });
+    check('auto-paint marks the overhangs green', sp.length >= 2 && sp.every((v) => v === '4'), sp.join(','));
+    const shade = await pg.evaluate(() => {
+      const o = [...window.orcaWeb.viewer.objects.values()][0];
+      const c = o.mesh.geometry.attributes.color.array;
+      return [...new Set(Array.from({ length: c.length / 9 }, (_, t) => [c[t * 9], c[t * 9 + 1], c[t * 9 + 2]].map((v) => v.toFixed(2)).join(',')))];
+    });
+    check('support paint is shown in green on a grey model', shade.length === 2, shade.join(' / '));
+    await pg.click('#paintColours button:nth-child(2)');
+    const [ta, tb] = await topCentre(pg);
+    await pg.mouse.move(...ta);
+    await pg.mouse.down();
+    await pg.mouse.move(...tb, { steps: 4 });
+    await pg.mouse.up();
+    await pg.waitForTimeout(200);
+    await pg.screenshot({ path: path.join(OUT, '17-support-paint.png') });
+    await pg.keyboard.press('Escape');
+    const sg = await sliceText(pg);
+    check('painted supports reach the engine and switch supports on', sg.includes('support-enforcer') && sg.includes('support-blocker')
+      && sg.includes('; enable_support = 1') && /support_type = \["?(tree|normal)\(manual\)/.test(sg.replace(/; support_type = (\w)/, '; support_type = ["$1')),
+      sg.split('\n').filter((l) => /modifier_volumes|enable_support|support_type/.test(l)).join(' | '));
+    await pg.keyboard.press('Control+z');
+    check('undo removes the last support stroke', await pg.evaluate(() => [...window.orcaWeb.state.objects[0].supportPaint.values()].every((v) => v === '4')));
     await ctx.close();
 
     // Paint engine: paint and parts go to the engine as OrcaSlicer data.
@@ -870,6 +927,7 @@ try {
   await p2.waitForFunction(() => document.getElementById('engineStatus').textContent.includes('ready'));
   await p2.setInputFiles('#modelFile', [path.join(models, 'tall-box.stl')]);
   await p2.waitForTimeout(500);
+  await p2.keyboard.press('l');
   await p2.click('#addBlocker');
   await p2.click('#advBtn');
   await p2.waitForTimeout(300);
