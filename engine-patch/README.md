@@ -18,6 +18,27 @@ What the change adds (two optional extensions, reported in the engine's capabili
 Painted meshes and parts are loaded without STL repair so triangle numbers
 stay the same as on the page.
 
+It also fixes **Save project** (the file students take to the workstation),
+reported as `x.orcaweb.projectSave`:
+
+- every model stays its own object, with its own filament, parts and paint
+  (the standard engine joined all models into one when there were no
+  supports painted), and every plate stays a plate;
+- with **Layers: Adaptive**, the saved project carries the adaptive layer
+  heights, worked out exactly as the slice does, so OrcaSlicer and Bambu
+  Studio show them in their Variable layer height tool.
+
+## Updating your engine copy with a new version of this file
+
+1. Open https://github.com/Dover-Bay-Makerspace/OrcaWeb, open the **bridge**
+   folder, then **Add file → Upload files**. Drag in `bridge/slicer.cpp` from
+   this folder (it replaces the old one) and click **Commit changes**.
+2. That starts **Build WASM** on that repository's Actions tab (3–4 hours).
+   Wait for the green tick.
+3. In **Orca-Web-Slicer**, open **Actions → Deploy site → Run workflow** so the
+   site picks up the new engine (the site only downloads the engine when it
+   deploys).
+
 ## Making your own engine copy (one time, about 15 minutes of clicks and a 3–4 hour build)
 
 1. Go to https://github.com/Hiosdra/OrcaWeb and click **Fork** (top right).
