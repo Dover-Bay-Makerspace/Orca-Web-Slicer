@@ -153,6 +153,51 @@ function downloadBytes(bytes, name, type) {
   setTimeout(() => URL.revokeObjectURL(a.href), 30000);
 }
 
+const SAVE_TYPES = {
+  'model/3mf': { description: '3MF project', accept: { 'model/3mf': ['.3mf'] } },
+  'text/x-gcode': { description: 'G-code', accept: { 'text/plain': ['.gcode'] } },
+  'application/zip': { description: 'Zip file', accept: { 'application/zip': ['.zip'] } },
+  'application/json': { description: 'Preset file', accept: { 'application/json': ['.json'] } },
+};
+
+/**
+ * Ask where to save, with Edge/Chrome's "Save As" window (it remembers the
+ * last folder, e.g. a USB stick or shared drive). Returns the chosen file,
+ * null to use the browser's normal download (other browsers, or blocked by
+ * policy), or false when the student cancels. Must run straight after a click.
+ */
+async function chooseSaveFile(name, type) {
+  const automated = navigator.webdriver && !window.orcaWebUsePicker;
+  if (typeof window.showSaveFilePicker !== 'function' || automated) return null;
+  try {
+    return await window.showSaveFilePicker({
+      suggestedName: name, id: 'orcaweb-save', startIn: 'downloads',
+      types: SAVE_TYPES[type] ? [SAVE_TYPES[type]] : undefined,
+    });
+  } catch (error) {
+    return error?.name === 'AbortError' ? false : null;
+  }
+}
+
+/** Write to the chosen file, or download when there is none. Returns the saved file's name. */
+async function writeSaveFile(target, bytes, name, type) {
+  if (target) {
+    const out = await target.createWritable();
+    await out.write(new Blob([bytes], { type }));
+    await out.close();
+    return target.name;
+  }
+  downloadBytes(bytes, name, type);
+  return name;
+}
+
+/** Save bytes where the student chooses: { name, picked }, or null if they cancelled. */
+async function saveBytes(bytes, name, type) {
+  const target = await chooseSaveFile(name, type);
+  if (target === false) return null;
+  return { name: await writeSaveFile(target, bytes, name, type), picked: !!target };
+}
+
 function safeName(text) {
   return String(text || 'print').replace(/[^\w.+-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'print';
 }
@@ -997,7 +1042,7 @@ async function savePresetFile(type, slotIndex = 0) {
     }
   }
   const file = name.replace(/\s+/g, '_') + '.json';
-  downloadBytes(new TextEncoder().encode(JSON.stringify(preset, null, 2)), file, 'application/json');
+  if (!await saveBytes(new TextEncoder().encode(JSON.stringify(preset, null, 2)), file, 'application/json')) return;
 
   // Use it in this browser straight away, under "Imported".
   const entry = { name, vendor: state.vendor.vendor, data: preset };
@@ -2658,24 +2703,27 @@ function outputName(plateId) {
   return [base, plate, layer ? `${layer}mm` : '', mat, printer].filter(Boolean).map(safeName).join('_') + '.gcode';
 }
 
-function download3mf() {
+async function download3mf() {
   const r = state.results.get(state.activePlate);
   if (!r || r.stale || !r.package) return;
-  downloadBytes(r.package, r.name.replace(/\.gcode$/, '.gcode.3mf'), 'model/3mf');
+  const saved = await saveBytes(r.package, r.name.replace(/\.gcode$/, '.gcode.3mf'), 'model/3mf');
+  if (saved?.picked) showMessage(`Saved ${saved.name}.`);
 }
 
-function download() {
+async function download() {
   const r = state.results.get(state.activePlate);
   if (!r || r.stale) return;
-  downloadBytes(r.gcode, r.name, 'text/x-gcode');
+  const saved = await saveBytes(r.gcode, r.name, 'text/x-gcode');
+  if (saved?.picked) showMessage(`Saved ${saved.name}.`);
 }
 
-function downloadAll() {
+async function downloadAll() {
   const fresh = state.plates.map((p) => state.results.get(p.id)).filter((r) => r && !r.stale);
   const files = fresh.flatMap((r) => [{ name: r.name, data: r.gcode }]
     .concat(r.package ? [{ name: r.name.replace(/\.gcode$/, '.gcode.3mf'), data: r.package }] : []));
   if (!files.length) return;
-  downloadBytes(makeZip(files), safeName(state.projectName || 'plates') + '_gcode.zip', 'application/zip');
+  const saved = await saveBytes(makeZip(files), safeName(state.projectName || 'plates') + '_gcode.zip', 'application/zip');
+  if (saved?.picked) showMessage(`Saved ${saved.name}.`);
 }
 
 function setupLayerSlider(preview) {
@@ -2920,14 +2968,17 @@ function newProject() {
 const saveProject = withBusy(async () => {
   const plateIds = state.plates.filter((p) => objectsOn(p.id).length).map((p) => p.id);
   if (!plateIds.length) return;
+  // Ask where to save first: the Save As window has to open straight after the click.
+  const suggested = safeName(state.projectName || objectsOn(plateIds[0])[0]?.name || 'project') + '.3mf';
+  const target = await chooseSaveFile(suggested, 'model/3mf');
+  if (target === false) { showMessage('Not saved.'); return; }
   showMessage('Saving project…');
   try {
     const { blob, manifest } = buildProject(plateIds);
     let { bytes } = await engine.exportProject(settingLayers(), blob, manifest);
     const marks = await addProjectMarkers(new Uint8Array(bytes), plateIds);
     bytes = marks.bytes;
-    const name = safeName(state.projectName || objectsOn(plateIds[0])[0]?.name || 'project') + '.3mf';
-    downloadBytes(bytes, name, 'model/3mf');
+    const name = await writeSaveFile(target, bytes, suggested, 'model/3mf');
     // Saved: close the result and go back to the models.
     if (viewer.mode === 'preview') setTab('prepare');
     showMessage(`Saved ${name}. Open it in OrcaSlicer or Bambu Studio on the workstation to check the settings and print`
