@@ -1,0 +1,47 @@
+# One-time cleanup: removes the files that a jumbled upload put at the top
+# level of the repository, then removes this file. Run it once from the
+# Actions tab (Clean up stray files -> Run workflow).
+name: Clean up stray files
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Remove the stray top-level files
+        run: |
+          set -e
+          files=(
+            "LICENSE (4)" "LICENSE-DejaVu.txt" "LICENSE-OFL.txt"
+            "LineMaterial.js" "LineSegmentsGeometry.js" "OrbitControls.js"
+            "README (2).md" "app.css" "build-fonts.py" "build-profiles.py"
+            "build-settings-schema.py" "dejavu-sans-condensed-bold.json"
+            "dejavu-serif-bold.json" "engine-client.js" "fetch-engine.ps1"
+            "fetch-engine.sh" "gcode-worker.js" "index.json" "main.js"
+            "mesh-tools.js" "meshes.js" "parts-worker.js" "poppins-bold.json"
+            "profiles.js" "project-io.js" "project-worker.js"
+            "settings-editor.js" "slicer-mt.js" "slicer.cpp" "text3d.js"
+            "three.core.js" "three.module.js" "thumbnails.js" "ui-test.mjs"
+            "viewer.js" "zip.js"
+          )
+          # ':(literal)' = exactly this path at the top level (never the
+          # real files of the same name inside js/, workers/, vendor/ ...).
+          for f in "${files[@]}"; do
+            git rm -q --ignore-unmatch -- ":(literal)$f"
+          done
+          git rm -q -- .github/workflows/cleanup.yml
+          git status --short
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898732+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Remove stray top-level files from a jumbled upload"
+          git push
