@@ -745,6 +745,31 @@ try {
     await op.setInputFiles('#projectFile', wPath);
     await op.waitForFunction(() => document.querySelectorAll('#objectList li').length > 0, null, { timeout: 15000 });
     check('opening the project brings its pauses back', /2 pauses\/colour changes/.test(await msg(op)), await msg(op));
+    // Save As window (Edge/Chrome): the student picks the folder and name.
+    await op.evaluate(() => {
+      window.orcaWebUsePicker = true;
+      window.__saved = null;
+      window.showSaveFilePicker = async (opts) => {
+        window.__pickerOpts = opts;
+        if (window.__cancelPicker) throw new DOMException('cancelled', 'AbortError');
+        return {
+          name: 'E-drive-copy.3mf',
+          createWritable: async () => {
+            const parts = [];
+            return { write: async (b) => parts.push(b), close: async () => { window.__saved = await new Blob(parts).arrayBuffer().then((a) => a.byteLength); } };
+          },
+        };
+      };
+    });
+    await op.click('#saveBtn');
+    await op.waitForFunction(() => window.__saved !== null, null, { timeout: 15000 });
+    const picked = await op.evaluate(() => ({ size: window.__saved, opts: window.__pickerOpts }));
+    check('Save As window: the student chooses where the project goes', picked.size > 100 && picked.opts.suggestedName.endsWith('.3mf')
+      && /Saved E-drive-copy\.3mf/.test(await msg(op)), JSON.stringify(picked.opts) + ' | ' + await msg(op));
+    await op.evaluate(() => { window.__cancelPicker = true; });
+    await op.click('#saveBtn');
+    await op.waitForTimeout(300);
+    check('cancelling the Save As window saves nothing', /Not saved/.test(await msg(op)), await msg(op));
     await octx.close();
 
     // Bambu: thumbnail picture and pause inside the .gcode.3mf.
