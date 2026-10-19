@@ -32,7 +32,7 @@ const ui = Object.fromEntries([
   'engineStatus', 'aboutBtn', 'aboutDialog', 'aboutVersions', 'sourceLink', 'newBtn', 'openBtn', 'saveBtn', 'projectFile',
   'vendorSelect', 'printerSelect', 'bedTypeSelect', 'bedInfo', 'slotList', 'addSlotBtn', 'slotHint', 'processSelect',
   'objFilament', 'objSwatch', 'rBreakdown', 'download3mfBtn',
-  'qLayer', 'qInfill', 'qWalls', 'qSupport', 'qBrim', 'qAdaptive', 'resetQuick', 'importPreset', 'presetFile', 'advBtn', 'advCount',
+  'qInfill', 'qWalls', 'qSupport', 'qBrim', 'qAdaptive', 'resetQuick', 'importPreset', 'presetFile', 'advBtn', 'advCount',
   'advPanel', 'sliceBtn', 'sliceAllBtn', 'progress', 'progressFill', 'progressText', 'cancelBtn', 'result', 'rPlate',
   'rTime', 'rFilament', 'workstationBtn', 'backBtn', 'downloadBtn', 'downloadAllBtn', 'rNote', 'message', 'tabPrepare', 'tabPreview', 'prepareTools',
   'addBtn', 'modelFile', 'arrangeBtn', 'orientBtn', 'rotX', 'rotY', 'rotZ', 'sizeX', 'sizeY', 'sizeZ', 'sizeLock', 'mirX', 'mirY', 'mirZ', 'splitBtn', 'rotateTool', 'layFlatTool', 'paintTool', 'paintBar', 'paintColours', 'paintErase',
@@ -869,7 +869,6 @@ function quickValues(get) {
 
 function fillQuick() {
   const v = quickValues(effective);
-  ui.qLayer.value = v.layer;
   ui.qInfill.value = v.infill;
   ui.qWalls.value = v.walls;
   ui.qSupport.value = v.support;
@@ -882,13 +881,9 @@ function fillQuick() {
 
 function quickChanged() {
   const base = quickValues(baseValue);
-  const layer = parseFloat(ui.qLayer.value);
   const infill = parseFloat(ui.qInfill.value);
   const walls = parseInt(ui.qWalls.value, 10);
   const asArray = (key, v) => (Array.isArray(baseValue(key)) ? [v] : v);
-  if (Number.isFinite(layer) && layer > 0) {
-    setOverride('layer_height', Math.abs(layer - base.layer) < 1e-9 ? undefined : asArray('layer_height', String(layer)));
-  }
   if (Number.isFinite(infill)) {
     const v = Math.max(0, Math.min(100, infill));
     setOverride('sparse_infill_density', v === base.infill ? undefined : asArray('sparse_infill_density', `${v}%`));
@@ -1872,6 +1867,7 @@ function painterFor(item, supports = false) {
   return item[key];
 }
 
+const saveEngineReady = () => state.capabilities?.features?.['x.orcaweb.projectSave'] === 'supported';
 const paintEngineReady = () => state.capabilities?.features?.['x.orcaweb.paint'] === 'supported';
 const partsEngineReady = () => state.capabilities?.features?.['x.orcaweb.parts'] === 'supported';
 
@@ -2936,7 +2932,9 @@ const saveProject = withBusy(async () => {
     if (viewer.mode === 'preview') setTab('prepare');
     showMessage(`Saved ${name}. Open it in OrcaSlicer or Bambu Studio on the workstation to check the settings and print`
       + (marks.count ? ` (its ${marks.count} pause${marks.count === 1 ? '' : 's'}/colour change${marks.count === 1 ? '' : 's'} are included).` : '.')
-      + ' It also opens here with "Open project…".');
+      + ' It also opens here with "Open project…".'
+      + (saveEngineReady() || (state.objects.length < 2 && state.plates.length < 2 && !state.adaptive) ? ''
+        : '\nNote: this engine copy joins all models into one and puts every plate together when it saves, and leaves out adaptive layers. Update your engine copy (engine-patch/README.md) to keep them.'));
   } catch (error) {
     showMessage(`Saving the project failed: ${errorText(error)}`, 'error');
   }
@@ -3146,10 +3144,10 @@ ui.printerSelect.onchange = withBusy(() => selectPrinter(ui.printerSelect.value)
 ui.processSelect.onchange = withBusy(async () => { await selectProcess(ui.processSelect.value); editor?.render(); });
 ui.addSlotBtn.onclick = withBusy(addSlot);
 ui.bedTypeSelect.onchange = () => { invalidateAll(); save(); };
-for (const el of [ui.qLayer, ui.qInfill, ui.qWalls, ui.qSupport, ui.qBrim]) el.addEventListener('change', quickChanged);
+for (const el of [ui.qInfill, ui.qWalls, ui.qSupport, ui.qBrim]) el.addEventListener('change', quickChanged);
 ui.qAdaptive.onchange = () => { state.adaptive = ui.qAdaptive.value || ''; invalidateAll(); save(); };
 ui.resetQuick.onclick = () => {
-  for (const k of ['layer_height', 'sparse_infill_density', 'wall_loops', 'enable_support', 'support_type', 'brim_type']) delete state.overrides[k];
+  for (const k of ['sparse_infill_density', 'wall_loops', 'enable_support', 'support_type', 'brim_type']) delete state.overrides[k];
   state.adaptive = '';
   settingsChanged();
   editor?.render();
