@@ -178,16 +178,18 @@ try {
   await page.keyboard.press('Escape');
 
   // ---- quick settings + Advanced editor
-  await page.fill('#qLayer', '0.28');
-  await page.dispatchEvent('#qLayer', 'change');
+  check('layer height comes from the profile (no separate box)', !(await page.$('#qLayer'))
+    && /layer height/i.test(await page.$eval('label:has(#processSelect) span', (e) => e.textContent)));
   await page.selectOption('#qSupport', 'tree');
   await page.selectOption('#bedTypeSelect', 'High Temp Plate');
-  check('quick changes counted on Advanced button', /3 changed/.test(await page.$eval('#advCount', (e) => e.textContent)), await page.$eval('#advCount', (e) => e.textContent));
+  check('quick changes counted on Advanced button', /2 changed/.test(await page.$eval('#advCount', (e) => e.textContent)), await page.$eval('#advCount', (e) => e.textContent));
   await page.click('#advBtn');
   await page.waitForSelector('#advPanel:not([hidden])');
   check('Advanced settings shows OrcaSlicer pages', (await page.$$eval('.adv-page', (b) => b.map((x) => x.textContent))).join(',').startsWith('Quality'));
+  await page.fill('#adv-layer_height', '0.3');
+  await page.dispatchEvent('#adv-layer_height', 'change');
   const layerRow = await page.$eval('#adv-layer_height', (i) => [i.value, i.closest('.adv-row').classList.contains('changed')]);
-  check('quick change shows in the editor as changed', layerRow[0] === '0.28' && layerRow[1], JSON.stringify(layerRow));
+  check('layer height can still be changed in Advanced settings', layerRow[0] === '0.3' && layerRow[1], JSON.stringify(layerRow));
   await page.selectOption('#adv-seam_position', 'back');
   await page.fill('.adv-search', 'ironing type');
   await page.waitForTimeout(100);
@@ -243,7 +245,7 @@ try {
   const g2 = zipped[names.find((n) => n.includes('plate2'))]?.toString() || '';
   check('plate 1 has 3 models and both support boxes', g1.includes('; objects = 3') && g1.includes('; modifier_volumes = support-enforcer,support-blocker'));
   check('plate 2 has 1 model', g2.includes('; objects = 1'));
-  check('quick + advanced settings reached the engine', g1.includes('; layer_height = "0.28"') && g1.includes('; support_type = tree(auto)')
+  check('quick + advanced settings reached the engine', g1.includes('; layer_height = "0.3"') && g1.includes('; support_type = tree(auto)')
     && g1.includes('; seam_position = back') && g1.includes('; ironing_type = top'));
   check('filament and printer edits reached the engine', g1.includes('; nozzle_temperature = ["212"]') && g1.includes('classroom start'));
   check('bed type and preset names reached the engine', g1.includes('; curr_bed_type = High Temp Plate') && g1.includes('; print_settings_id = 0.20mm Speed @MK3S 0.4'), g1.split('\n').filter((l) => /curr_bed_type|print_settings_id/.test(l)).join(' | '));
@@ -270,7 +272,7 @@ try {
     && (await page.$eval('#vendorSelect', (s) => s.value)) === 'Prusa');
   check('project restored setting changes', /settings? from the project differ/.test(opened) && /changed/.test(await page.$eval('#advCount', (e) => e.textContent)),
     await page.$eval('#advCount', (e) => e.textContent));
-  check('quick settings show project values', (await page.$eval('#qLayer', (i) => i.value)) === '0.28' && (await page.$eval('#qSupport', (i) => i.value)) === 'tree');
+  check('quick settings show project values', (await page.$eval('#qSupport', (i) => i.value)) === 'tree');
   await page.click('#sliceAllBtn');
   await page.waitForFunction(() => [...document.querySelectorAll('.plate-chip .chip-meta')].every((e) => e.textContent.includes('✓')), null, { timeout: 30000 });
   const [zip2] = await Promise.all([page.waitForEvent('download'), page.click('#downloadAllBtn')]);
