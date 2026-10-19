@@ -11,6 +11,11 @@ that PC. There is deliberately **no printer or network connection**.
 Printing straight from the page is still possible with the smaller **G-code**
 and **Bambu (.gcode.3mf)** downloads.
 
+**Choosing where files go:** in Edge and Chrome every save (the workstation
+project, G-code, presets) opens a Save As window, so students can pick a USB
+stick or shared drive; it remembers the last folder. Other browsers, or PCs
+where the district blocks it, use the normal Downloads folder.
+
 **What the workstation project keeps:** every plate and model (including cut,
 mirrored, text and shape models), the printer, print profile and filaments
 by their desktop preset names plus any changed settings, colour painting,
