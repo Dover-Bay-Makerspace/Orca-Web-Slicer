@@ -65,7 +65,7 @@ jobs:
             https://github.com/OrcaSlicer/OrcaSlicer.git "$RUNNER_TEMP/orca"
           git -C "$RUNNER_TEMP/orca" sparse-checkout set --no-cone \
             '/resources/profiles/*.json' '/resources/profiles/**/*.json' \
-            '/src/libslic3r/PrintConfig.cpp' '/src/slic3r/GUI/Tab.cpp'
+               '/src/libslic3r/PrintConfig.cpp' '/src/libslic3r/Preset.cpp' '/src/slic3r/GUI/Tab.cpp'
 
       - name: Build profile library
         env:
