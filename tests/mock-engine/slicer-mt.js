@@ -285,6 +285,10 @@ var OneSlicerEngine = (function () {
       res.join('') + '</resources><build>' + build.join('') + '</build></model>';
     var settings = '<?xml version="1.0" encoding="UTF-8"?>\n<config>' + settingsXml.join('') + plates.join('') + '</config>';
     var cfgOut = {}; for (var k in cfg) cfgOut[k] = cfg[k];
+    // Like the real engine: filament settings no profile mentions keep
+    // OrcaSlicer's built-in one-value default, whatever the filament count.
+    if (!('filament_printable' in cfgOut)) cfgOut.filament_printable = ['3'];
+    if (!('filament_cooling_moves' in cfgOut)) cfgOut.filament_cooling_moves = ['4'];
     var extra = [];
     if (options && options.includeSliceArtifacts) {
       var self2 = this;

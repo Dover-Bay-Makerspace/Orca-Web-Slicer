@@ -3,11 +3,14 @@
 Build settings-schema.json for the Advanced settings editor from an OrcaSlicer
 source checkout.
 
-It reads two OrcaSlicer source files:
+It reads these OrcaSlicer source files:
   src/slic3r/GUI/Tab.cpp            which settings appear on which tab/page/group
                                     of the desktop app, in what order
   src/libslic3r/PrintConfig.cpp     each setting's label, tooltip, type, unit,
                                     limits, choices and simple/advanced level
+  src/libslic3r/Preset.cpp          (optional) which settings are per-filament;
+                                    saved projects get one value per filament
+                                    for each of them (js/filament-lists.js)
 
 so the web editor shows the same settings, in the same places, with the same
 names and help text as desktop OrcaSlicer.
@@ -15,7 +18,7 @@ names and help text as desktop OrcaSlicer.
 Usage:
   python3 tools/build-settings-schema.py --orca /path/to/OrcaSlicer --out settings-schema.json
 
-The checkout needs those two files (a sparse checkout is fine).
+The checkout needs those files (a sparse checkout is fine).
 """
 
 import argparse
@@ -321,6 +324,19 @@ def parse_defs(code):
     return defs
 
 
+def filament_keys(preset_path):
+    """The per-filament settings (Preset.cpp's s_Preset_filament_options), or []."""
+    if not os.path.isfile(preset_path):
+        return []
+    code = strip_comments(open(preset_path, encoding="utf-8").read())
+    m = re.search(r"s_Preset_filament_options\s*\{(.*?)\};", code, re.S)
+    if not m:
+        return []
+    skip = {"inherits"}
+    return [k for k in re.findall(r'"([A-Za-z0-9_]+)"', m.group(1))
+            if k not in skip and not k.startswith("compatible_")]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--orca", required=True)
@@ -361,6 +377,12 @@ def main():
         tabs[t] = [p for p in pages if p["groups"]]
 
     schema = {"tabs": tabs, "options": {k: defs[k] for k in sorted(used)}}
+    keys = filament_keys(os.path.join(a.orca, "src", "libslic3r", "Preset.cpp"))
+    if keys:
+        schema["filamentKeys"] = keys
+        print(f"  {len(keys)} per-filament settings")
+    else:
+        print("  Preset.cpp not found or not understood: saved projects use the built-in per-filament list")
     with open(a.out, "w", encoding="utf-8") as fh:
         json.dump(schema, fh, separators=(",", ":"), ensure_ascii=False)
     counts = {t: sum(len(g["options"]) for p in v for g in p["groups"]) for t, v in tabs.items()}

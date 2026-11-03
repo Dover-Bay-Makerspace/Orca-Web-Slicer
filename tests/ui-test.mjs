@@ -386,6 +386,15 @@ try {
     const ut = fs.readFileSync(up, 'utf8');
     check('U1: filament 4 goes to tool head 4', ut.includes('; filament_map = ["1","2","3","4"]') && /^T3$/m.test(ut));
     check('no Bambu package for other printers', !(await mp.isVisible('#download3mfBtn')));
+    // Desktop OrcaSlicer crashes opening a project whose per-filament lists are
+    // shorter than its filament count (js/filament-lists.js).
+    const [u1p] = await Promise.all([mp.waitForEvent('download'), mp.click('#saveBtn')]);
+    const u1Path = path.join(OUT, 'u1-project.3mf');
+    await u1p.saveAs(u1Path);
+    const u1cfg = JSON.parse(unzip(fs.readFileSync(u1Path))['Metadata/project_settings.config'].toString());
+    const shortLists = ['filament_printable', 'filament_cooling_moves', 'filament_type', 'nozzle_temperature']
+      .filter((k) => !Array.isArray(u1cfg[k]) || u1cfg[k].length !== 4);
+    check('U1 project: every per-filament setting has 4 values', shortLists.length === 0, shortLists.join(', '));
 
     if (SAMPLES && fs.existsSync(path.join(SAMPLES, 'OrcaSliced.3mf'))) {
       await mp.selectOption('#vendorSelect', 'BBL');

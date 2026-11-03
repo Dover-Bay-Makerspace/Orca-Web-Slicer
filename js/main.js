@@ -14,6 +14,7 @@ import { fontList, loadFont, textSolid } from './text3d.js';
 import { md5 } from './md5.js';
 import { thumbnailSizes, thumbnailBlock, pngBytes } from './thumbnails.js';
 import { flushVolume } from './flush.js';
+import { completeFilamentLists } from './filament-lists.js';
 
 const API_VERSION = '0.7.0';
 const STORE_KEY = 'orcaweb.settings.v2';
@@ -2584,6 +2585,7 @@ async function finishGcode(plateId) {
       console.warn('package', error);
     }
   }
+  if (r.package) r.package = await completeFilamentLists(r.package, state.schema?.filamentKeys);
 }
 
 function renderMarkers() {
@@ -2976,7 +2978,9 @@ const saveProject = withBusy(async () => {
   try {
     const { blob, manifest } = buildProject(plateIds);
     let { bytes } = await engine.exportProject(settingLayers(), blob, manifest);
-    const marks = await addProjectMarkers(new Uint8Array(bytes), plateIds);
+    // Desktop OrcaSlicer crashes on a project whose filament lists are shorter than its filaments.
+    bytes = await completeFilamentLists(new Uint8Array(bytes), state.schema?.filamentKeys);
+    const marks = await addProjectMarkers(bytes, plateIds);
     bytes = marks.bytes;
     const name = await writeSaveFile(target, bytes, suggested, 'model/3mf');
     // Saved: close the result and go back to the models.
