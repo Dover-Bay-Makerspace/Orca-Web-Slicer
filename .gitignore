@@ -1,0 +1,4 @@
+# Made by the deploy step (tools/build-profiles.py, tools/build-settings-schema.py)
+profiles/
+settings-schema.json
+__pycache__/
