@@ -35,7 +35,7 @@ const ui = Object.fromEntries([
   'objFilament', 'objSwatch', 'rBreakdown', 'download3mfBtn',
   'qInfill', 'qWalls', 'qSupport', 'qBrim', 'qAdaptive', 'resetQuick', 'importPreset', 'presetFile', 'advBtn', 'advCount',
   'advPanel', 'sliceBtn', 'sliceAllBtn', 'progress', 'progressFill', 'progressText', 'cancelBtn', 'result', 'rPlate',
-  'rTime', 'rFilament', 'workstationBtn', 'backBtn', 'downloadBtn', 'downloadAllBtn', 'rNote', 'message', 'tabPrepare', 'tabPreview', 'prepareTools',
+  'rTime', 'rFilament', 'workstationBtn', 'backBtn', 'downloadBtn', 'downloadAllBtn', 'otherDownloads', 'rNote', 'message', 'tabPrepare', 'tabPreview', 'prepareTools',
   'addBtn', 'modelFile', 'arrangeBtn', 'orientBtn', 'rotX', 'rotY', 'rotZ', 'sizeX', 'sizeY', 'sizeZ', 'sizeLock', 'mirX', 'mirY', 'mirZ', 'splitBtn', 'rotateTool', 'layFlatTool', 'paintTool', 'paintBar', 'paintColours', 'paintErase',
   'paintBrushMode', 'paintFillMode', 'paintSize', 'paintSizeText', 'paintAngle', 'paintAngleText', 'paintSizeRow',
   'paintAngleRow', 'paintUndo', 'paintRedo', 'paintClear', 'paintHint', 'undoBtn', 'redoBtn', 'supportTool', 'supportAutoRow',
@@ -298,6 +298,24 @@ function effectiveMachine() {
   return m;
 }
 
+/** A preset's settings without the site's own extra keys (they start with "_"). */
+function engineSettings(settings) {
+  const out = {};
+  for (const [k, v] of Object.entries(settings || {})) if (!k.startsWith('_')) out[k] = v;
+  return out;
+}
+
+/**
+ * True for a printer whose presets come from a newer OrcaSlicer than the
+ * engine (custom-printers/): the engine slices with stand-in G-code, so its
+ * G-code is for the preview only and the printer is printed from the
+ * workstation, where the saved project carries the printer's own G-code.
+ */
+function workstationOnly(m = state.machine) {
+  const w = m && m._workstation;
+  return !!(w && Object.keys(w).some((k) => /gcode$/.test(k)));
+}
+
 /** The ordered setting layers the engine applies for a slice of the given plates. */
 function settingLayers(plateIds = state.plates.map((p) => p.id), shift = null) {
   const m = effectiveMachine();
@@ -363,8 +381,8 @@ function settingLayers(plateIds = state.plates.map((p) => p.id), shift = null) {
   // Values worked out here (from the presets and the user's changes) win over the raw changes.
   const shifted = shift ? shiftedBedSettings(shift, { ...changes, ...final }) : {};
   return [
-    { settings: state.machine },
-    { settings: state.process },
+    { settings: engineSettings(state.machine) },
+    { settings: engineSettings(state.process) },
     { settings: fil },
     { format: 'orca.native-json', settings: { ...changes, ...final, ...shifted } },
   ];
@@ -687,6 +705,8 @@ function recomputeFilaments() {
     out[key] = Array.from({ length: total }, (_, i) => one(vals[i] !== undefined && vals[i] !== null ? vals[i] : (i < slots.length ? def : vals[0] ?? def)));
   }
   out.filament_colour = Array.from({ length: total }, (_, i) => (slots[i] || slots[0]).colour);
+  // Each filament's material code (Bambu's start G-code checks it), as desktop OrcaSlicer fills it in.
+  out.filament_ids = Array.from({ length: total }, (_, i) => String(one((slots[i] || slots[0]).settings.filament_id) || ''));
   state.filamentCombined = out;
 }
 
@@ -2661,7 +2681,7 @@ function renderResult() {
   const showing = viewer.mode === 'preview';
   ui.result.hidden = !r || !showing;
   const fresh = [...state.results.entries()].filter(([id, x]) => !x.stale && state.plates.some((p) => p.id === id));
-  ui.downloadAllBtn.hidden = fresh.length < 2 || !showing;
+  ui.downloadAllBtn.hidden = fresh.length < 2 || !showing || workstationOnly();
   ui.downloadAllBtn.textContent = `Download all ${fresh.length} plates (.zip)`;
   if (!r) return;
   const st = r.statistics || {};
@@ -2681,7 +2701,10 @@ function renderResult() {
     return li;
   }) : []));
   ui.rBreakdown.hidden = masses.length < 2;
-  ui.download3mfBtn.hidden = !r.package;
+  const viaWorkstation = workstationOnly();
+  ui.download3mfBtn.hidden = !r.package || viaWorkstation;
+  ui.downloadBtn.hidden = viaWorkstation;
+  ui.otherDownloads.hidden = viaWorkstation;
   ui.download3mfBtn.disabled = r.stale;
   ui.result.classList.toggle('stale', r.stale);
   ui.downloadBtn.disabled = r.stale;
@@ -2980,6 +3003,7 @@ const saveProject = withBusy(async () => {
     let { bytes } = await engine.exportProject(settingLayers(), blob, manifest);
     // Desktop OrcaSlicer crashes on a project whose filament lists are shorter than its filaments.
     bytes = await completeFilamentLists(new Uint8Array(bytes), state.schema?.filamentKeys);
+    bytes = await restoreWorkstationSettings(bytes);
     const marks = await addProjectMarkers(bytes, plateIds);
     bytes = marks.bytes;
     const name = await writeSaveFile(target, bytes, suggested, 'model/3mf');
@@ -2994,6 +3018,53 @@ const saveProject = withBusy(async () => {
     showMessage(`Saving the project failed: ${errorText(error)}`, 'error');
   }
 });
+
+/**
+ * Presets from a newer OrcaSlicer (custom-printers/) keep, under "_workstation",
+ * the settings and G-code the engine can't use. Put them back into the saved
+ * project so the workstation's OrcaSlicer or Bambu Studio gets the printer's
+ * own presets. Settings the student changed are left as they are.
+ */
+async function restoreWorkstationSettings(bytes) {
+  const machine = state.machine?._workstation;
+  const process = state.process?._workstation;
+  const slots = state.slots.map((x) => x.settings?._workstation || null);
+  if (!machine && !process && !slots.some(Boolean)) return bytes;
+  try {
+    const files = await readZip(bytes);
+    const entry = files.find((f) => f.name === 'Metadata/project_settings.config');
+    if (!entry) return bytes;
+    const config = JSON.parse(new TextDecoder().decode(entry.data));
+    // The student's own changes and the values the site works out for this
+    // project (colours, plate type, supports, prime tower...) stay as saved.
+    const own = settingLayers()[3].settings;
+    const changed = (k) => k in state.overrides || k in own || METADATA_KEYS.has(k);
+    for (const w of [machine, process]) {
+      for (const [k, v] of Object.entries(w || {})) if (!changed(k)) config[k] = v;
+    }
+    const count = Array.isArray(config.filament_settings_id) ? config.filament_settings_id.length : state.slots.length;
+    const keys = new Set(slots.flatMap((w) => Object.keys(w || {})));
+    for (const k of keys) {
+      if (changed(k)) continue;
+      const saved = Array.isArray(config[k]) && config[k].length === count ? config[k] : null;
+      const values = Array.from({ length: count }, (_, i) => slots[i] && slots[i][k]);
+      const fallback = values.find((v) => v !== undefined && v !== null);
+      if (fallback === undefined) continue;
+      // A filament without its own original keeps what the engine saved for it;
+      // a setting the engine doesn't know borrows another filament's value so
+      // every list stays one entry per filament (desktop needs that).
+      config[k] = values.map((v, i) => {
+        const x = v !== undefined && v !== null ? v : (saved ? saved[i] : fallback);
+        return Array.isArray(x) ? x[0] : x;
+      });
+    }
+    entry.data = new TextEncoder().encode(JSON.stringify(config, null, 4));
+    return makeZip(files);
+  } catch (error) {
+    console.warn('workstation settings', error);
+    return bytes;
+  }
+}
 
 /**
  * Pauses and colour changes go into the project as desktop OrcaSlicer /

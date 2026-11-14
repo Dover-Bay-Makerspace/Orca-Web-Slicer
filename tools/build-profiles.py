@@ -332,10 +332,14 @@ def load_custom(lib, folder):
         name = str(data.get("name") or os.path.splitext(os.path.basename(source))[0]).strip()
         data = dict(data, name=name, type=ptype, instantiation="true")
         data.pop("_parent", None)
-        lib.presets[(CUSTOM_VENDOR, ptype, name)] = {
-            "vendor": CUSTOM_VENDOR, "type": ptype, "name": name, "sub_path": source, "data": data,
+        # "_brand" files a preset under an OrcaSlicer brand instead of "My
+        # printers" (tools/newer-printer-presets.py: a printer that only a newer
+        # OrcaSlicer has, listed with the rest of its brand).
+        vendor = data.get("_brand") if data.get("_brand") in lib.vendors else CUSTOM_VENDOR
+        lib.presets[(vendor, ptype, name)] = {
+            "vendor": vendor, "type": ptype, "name": name, "sub_path": source, "data": data,
         }
-        found.append((ptype, name))
+        found.append((ptype if vendor == CUSTOM_VENDOR else "branded", name))
 
     for dirpath, _dirs, files in os.walk(folder):
         for fname in sorted(files):
@@ -351,7 +355,7 @@ def load_custom(lib, folder):
                                 add(json.loads(z.read(member).decode("utf-8-sig")), f"{fname}/{member}")
             except (ValueError, OSError, zipfile.BadZipFile) as exc:
                 skipped.append(f"{fname}: {exc}")
-    if found or skipped:
+    if any(t != "branded" for t, _ in found) or skipped:
         lib.vendors.append(CUSTOM_VENDOR)
     return found, skipped
 
@@ -595,12 +599,15 @@ def main():
               + ", ".join(missing[:8]) + (" ..." if len(missing) > 8 else ""))
     if args.custom:
         print(f"Custom presets in {args.custom}: " + (", ".join(f"{n} ({'printer' if t == 'machine' else t})"
-                                                          for t, n in custom_found) or "none"))
+                                                          for t, n in custom_found if t != "branded") or "none"))
+        branded = [n for t, n in custom_found if t == "branded"]
+        if branded:
+            print(f"  plus {len(branded)} preset(s) listed under their own brand (\"_brand\")")
         for note in custom_notes:
             print("  " + note)
         for bad in custom_skipped:
             print(f"  ! skipped {bad}", file=sys.stderr)
-        if custom_found and not any(t == "machine" for t, _ in custom_found):
+        if [t for t, _ in custom_found if t != "branded"] and not any(t == "machine" for t, _ in custom_found):
             print("  (no printer presets there, so there is no 'My printers' brand; the print and "
                   "filament presets are listed under the printers they fit)")
     if problems:
