@@ -501,10 +501,14 @@ function settingsChanged() {
 
 // --------------------------------------------------------------- profiles --
 
+/** The name a brand is shown by (OrcaSlicer calls Bambu Lab's folder "BBL"). */
+const BRAND_LABELS = { BBL: 'Bambu' };
+const brandLabel = (name) => BRAND_LABELS[name] || name;
+
 async function initProfiles() {
   state.index = await loadIndex();
   state.library = await loadLibrary();
-  ui.vendorSelect.replaceChildren(...state.index.vendors.map((v) => option(v.name, v.name)));
+  ui.vendorSelect.replaceChildren(...state.index.vendors.map((v) => option(v.name, brandLabel(v.name))));
   const wanted = state.saved.vendor && state.index.vendors.some((v) => v.name === state.saved.vendor)
     ? state.saved.vendor
     : (state.index.vendors.find((v) => v.name === 'My printers') || state.index.vendors.find((v) => v.name === 'Prusa')
@@ -645,7 +649,7 @@ function buildFilamentOptions() {
   const group = (label, items) => `<optgroup label="${esc(label)}">${items.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('')}</optgroup>`;
   const parts = [];
   if (state.userPresets.filament.length) parts.push(group('Imported', state.userPresets.filament.map((u) => ['user:' + u.name, u.name])));
-  if (state.printer.filaments.length) parts.push(group(`${state.vendor.vendor} filaments`, state.printer.filaments.map((n) => [n, n])));
+  if (state.printer.filaments.length) parts.push(group(`${brandLabel(state.vendor.vendor)} filaments`, state.printer.filaments.map((n) => [n, n])));
   const byBrand = new Map();
   for (const f of state.library.filaments) {
     if (!byBrand.has(f.brand)) byBrand.set(f.brand, []);

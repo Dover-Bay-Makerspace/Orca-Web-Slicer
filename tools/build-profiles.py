@@ -366,6 +366,10 @@ def main():
     ap.add_argument("--out", default="profiles", help="output directory (replaced)")
     ap.add_argument("--vendors", default="", help="comma-separated vendor folder names to include (default: all)")
     ap.add_argument("--custom", default="", help="folder of your own presets, published as the brand 'My printers'")
+    ap.add_argument("--models", default="",
+                    help="comma-separated printer models to list (e.g. 'Bambu Lab A1, Snapmaker U1'); "
+                         "every nozzle size of each is kept. Default: every model of the chosen brands. "
+                         "Printers in the custom folder are always listed.")
     args = ap.parse_args()
 
     root = os.path.join(args.orca, "resources", "profiles")
@@ -485,6 +489,9 @@ def main():
                                    if v == vendor and t == ptype and is_instance(lib.resolve(r))]
         return instance_cache[key]
 
+    # Only these printer models, if a list was given (matched forgivingly, like brands).
+    models = {norm(x) for x in re.split(r"[,;\n]", args.models) if x.strip()}
+    models_seen = set()
     custom_notes = []
     for vendor in wanted:
         if vendor == LIBRARY_VENDOR:
@@ -501,6 +508,10 @@ def main():
             mcfg = lib.resolve(m)
             if str(first_value(mcfg.get("printer_technology", "FFF"))) not in ("FFF", ""):
                 continue
+            model_name = str(first_value(mcfg.get("printer_model", "")) or m["name"])
+            if models and vendor != CUSTOM_VENDOR and norm(model_name) not in models:
+                continue
+            models_seen.add(norm(model_name))
             names, home = [m["name"]], vendor
             if vendor == CUSTOM_VENDOR:
                 # A custom printer also takes the presets of the printers it is based on.
@@ -590,6 +601,8 @@ def main():
     with open(os.path.join(args.out, "names.json"), "w", encoding="utf-8") as fh:
         json.dump(names, fh, separators=(",", ":"), ensure_ascii=False)
 
+    if models - models_seen:
+        print(f"WARNING: no printers found for model(s): {', '.join(sorted(models - models_seen))}", file=sys.stderr)
     missing = sorted({r.get("missing_parent") for r in lib.presets.values() if r.get("missing_parent")})
     print(f"Orca profile library {version}: {len(top['vendors'])} vendors, {totals['printers']} printers, "
           f"{totals['processes']} process presets, {totals['filaments']} vendor filaments, "

@@ -15,7 +15,11 @@ name: Deploy site
 # "Custom" is OrcaSlicer's generic Klipper/Marlin/RRF printers, a good starting
 # point for home-built printers. Your own printer files go in custom-printers/.
 env:
-  PRINTER_BRANDS: "Bambu, Snapmaker, Prusa, Custom"
+  PRINTER_BRANDS: "Bambu, Snapmaker"
+  # Printer models students can pick from (every nozzle size of each is
+  # listed). Use the model names OrcaSlicer uses, separated by commas. Leave it
+  # empty ("") to list every model of the brands above.
+  PRINTER_MODELS: "Bambu Lab A1, Bambu Lab A2L, Snapmaker U1"
   # Where the slicing engine comes from. "Hiosdra/OrcaWeb" is the standard
   # engine. After your own engine copy (with colour painting) has finished
   # building, change this to "Dover-Bay-Makerspace/OrcaWeb" and commit.
@@ -72,7 +76,7 @@ jobs:
           BRANDS: ${{ github.event.inputs.vendors || env.PRINTER_BRANDS }}
         run: |
           python3 tools/build-profiles.py --orca "$RUNNER_TEMP/orca" --out profiles \
-            --vendors "$BRANDS" --custom custom-printers
+            --vendors "$BRANDS" --models "$PRINTER_MODELS" --custom custom-printers
 
       - name: Build Advanced settings list
         run: python3 tools/build-settings-schema.py --orca "$RUNNER_TEMP/orca" --out settings-schema.json
